@@ -1,0 +1,35 @@
+[package]
+name = "semnav"
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+authors = ["Yasu_umi"]
+repository = "https://github.com/Yasu-umi/semnav"
+description = "LSP-backed Semantic Graph MCP server"
+
+[dependencies]
+anyhow = "1.0.103"
+# Opaque cursor encoding for query pagination (`docs/design/mcp-tools.md` Page).
+# Tiny, ubiquitous, well-audited; the only API used is URL-safe encode/decode of
+# the `SortKey` tuple.
+base64 = "0.22"
+ignore = "0.4.27"
+# `libc::kill` sends SIGTERM/SIGKILL during the LSP graceful-shutdown
+# escalation (docs/design/lsp-lifecycle.md shutdown). Minimal FFI, no
+# build cost; the only API used is `kill(pid, sig)` under `#[cfg(unix)]`.
+libc = "0.2"
+notify = "8.2.0"
+refinery = { version = "0.9.2", default-features = false, features = ["rusqlite"] }
+rmcp = { version = "2.0.0", features = ["transport-io"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
+schemars = "1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "sync", "time", "process", "fs", "io-util", "signal"] }
+which = "7"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+# `test-util` enables `#[tokio::test(start_paused = true)]` for deterministic
+# backoff/down-retry timing in the supervisor state-machine tests.
+tokio = { version = "1.52.3", features = ["test-util", "macros", "rt-multi-thread"] }
