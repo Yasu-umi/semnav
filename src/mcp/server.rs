@@ -13,7 +13,8 @@ use crate::query::{FindSymbolResult, QueryRuntime, ReadRangeResult, SymbolRef};
 
 use super::dto::{
     FindCalleesOutput, FindCallersOutput, FindDefinitionInput, FindDefinitionOutput,
-    FindReferencesOutput, FindSymbolInput, ReadRangeInput, SymbolQueryInput,
+    FindReferencesOutput, FindSymbolInput, ReadRangeInput, RestartLspInput, RestartLspResult,
+    SymbolQueryInput,
 };
 
 /// The MCP server, exposing `QueryRuntime`'s 6 operations as tools.
@@ -137,6 +138,18 @@ impl SemnavServer {
             .await
             .map_err(internal_error)?;
         Ok(Json(result))
+    }
+
+    #[tool(
+        name = "restart_lsp",
+        description = "Force a language's LSP server to restart (or all servers if language is omitted); a maintenance operation, not a graph query (docs/design/mcp-tools.md)."
+    )]
+    pub async fn restart_lsp(
+        &self,
+        Parameters(input): Parameters<RestartLspInput>,
+    ) -> Result<Json<RestartLspResult>, ErrorData> {
+        let restarted = self.runtime.restart_language(input.language.as_deref()).await;
+        Ok(Json(RestartLspResult { restarted }))
     }
 }
 

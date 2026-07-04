@@ -259,6 +259,33 @@ impl QueryRuntime {
         }
     }
 
+    /// Force a specific language's server to restart (or every provisioned
+    /// language, if `None`): gracefully shuts down its current supervisor and
+    /// drops it from the pool, so the next `acquire` lazily respawns it from
+    /// `NotStarted` — the exact path a first-ever query for that language
+    /// already takes. No new supervisor message type is needed. For a stuck
+    /// server that isn't erroring (so the automatic restart-on-failure policy
+    /// never kicks in), this is the only way to force recovery short of
+    /// restarting the whole process. Returns the languages that were reset.
+    pub async fn restart_language(&self, language: Option<&str>) -> Vec<String> {
+        let handles: Vec<(String, SupervisorHandle)> = {
+            let mut map = self.supervisors.lock().expect("supervisor map poisoned");
+            match language {
+                Some(lang) => map
+                    .remove(lang)
+                    .into_iter()
+                    .map(|h| (lang.to_string(), h))
+                    .collect(),
+                None => map.drain().collect(),
+            }
+        };
+        let restarted: Vec<String> = handles.iter().map(|(l, _)| l.clone()).collect();
+        for (_, handle) in handles {
+            let _ = handle.shutdown().await;
+        }
+        restarted
+    }
+
     /// Acquire the same live per-language client `find_references`/
     /// `find_callers`/`find_callees` use, for the FS watcher's `didChange`
     /// plumbing (`src/indexer/reconcile.rs`) — sharing the connection (rather
@@ -465,6 +492,75 @@ mod tests {
             runtime.supervisors.lock().unwrap().is_empty(),
             "no server spawned for an unknown fqn"
         );
+    }
+
+    /// `restart_language` on a runtime that never acquired anything is a safe
+    /// no-op — it must not panic or try to shut down a supervisor that was
+    /// never spawned.
+    #[tokio::test]
+    async fn restart_language_on_empty_runtime_is_noop() {
+        let dir = tempdir().unwrap();
+        let db = DbActor::spawn(&dir.path().join("g.db")).unwrap();
+        let engine = QueryEngine::new(db, "file:///repo".into());
+        let runtime = QueryRuntime::open(engine, dir.path().join("servers"));
+
+        assert_eq!(runtime.restart_language(Some("python")).await, Vec::<String>::new());
+        assert_eq!(runtime.restart_language(None).await, Vec::<String>::new());
+    }
+
+    /// Real pyright, end-to-end: acquire python's supervisor via a live query,
+    /// force-restart it, then confirm the pool cleanly respawns on the next
+    /// query rather than reusing a stale handle. Ignored by default — it needs
+    /// node/npm and provisions pyright from npm on first run.
+    #[ignore = "requires node/npm; provisions pyright from npm on first run"]
+    #[tokio::test]
+    async fn restart_language_removes_and_respawns_supervisor() {
+        let dir = tempdir().expect("tempdir");
+        let app = dir.path().join("app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join("mod.py"), "def helper():\n    return 1\n").unwrap();
+
+        let root_uri = root_uri_for(dir.path());
+        let cache_dir = dir.path().join(".semnav");
+        let servers_dir = cache_dir.join("servers");
+        let db_path = cache_dir.join("graph.db");
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let db = DbActor::spawn(&db_path).expect("spawn db");
+        index_language(&db, "python", &root_uri, &servers_dir)
+            .await
+            .expect("index python");
+
+        let engine = QueryEngine::new(db, root_uri.clone());
+        let runtime = QueryRuntime::open(engine, servers_dir);
+
+        let uri = format!("{}app/mod.py", root_uri);
+        runtime
+            .find_definition(&SymbolRef::At {
+                uri: uri.clone(),
+                line: 0,
+                character: 4,
+            })
+            .await
+            .expect("first query spawns python's supervisor");
+        assert!(runtime.supervisors.lock().unwrap().contains_key("python"));
+
+        let restarted = runtime.restart_language(Some("python")).await;
+        assert_eq!(restarted, vec!["python".to_string()]);
+        assert!(!runtime.supervisors.lock().unwrap().contains_key("python"));
+
+        // The next query must respawn cleanly, not error on a stale handle.
+        let (res, degradation) = runtime
+            .find_definition(&SymbolRef::At {
+                uri,
+                line: 0,
+                character: 4,
+            })
+            .await
+            .expect("query respawns python's supervisor after restart");
+        assert_eq!(res.nodes.len(), 1);
+        assert!(degradation.is_none());
+
+        runtime.shutdown_all().await;
     }
 
     /// Real pyright, end-to-end: index a module, then query the runtime for the

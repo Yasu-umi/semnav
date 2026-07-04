@@ -193,6 +193,20 @@ impl ReadRangeInput {
     }
 }
 
+/// `restart_lsp` request: force a specific language's server to restart, or
+/// every provisioned language when `language` is omitted. A maintenance
+/// operation, not one of the 6 graph-query tools (`docs/design/mcp-tools.md`).
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct RestartLspInput {
+    pub language: Option<String>,
+}
+
+/// `restart_lsp` response: the languages whose server was actually reset.
+#[derive(Debug, Clone, serde::Serialize, JsonSchema)]
+pub struct RestartLspResult {
+    pub restarted: Vec<String>,
+}
+
 /// The degraded-response annotation, folded into a tool's output only when a
 /// degradation actually occurred (`docs/design/resilience.md`) — never
 /// serialized as `degraded: false`.

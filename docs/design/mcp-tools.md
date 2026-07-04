@@ -1,6 +1,6 @@
 # MCP Tools (0.0.1)
 
-The tool interface that the Semantic Graph MCP exposes to agents. 0.0.1 provides **6 tools** (`find_symbol` / `find_definition` / `find_references` / `find_callers` / `find_callees` / `read_range`).
+The tool interface that the Semantic Graph MCP exposes to agents. 0.0.1 provides **6 query tools** (`find_symbol` / `find_definition` / `find_references` / `find_callers` / `find_callees` / `read_range`) plus **1 maintenance tool** (`restart_lsp`, see below).
 
 > MCP tool interface (C). See [graph-model.md](./graph-model.md) for the internal schema, [lsp-integration.md](./lsp-integration.md) for the LSP origin of each edge, and [indexing-and-cache.md](./indexing-and-cache.md) for on-demand Edge construction.
 
@@ -167,6 +167,22 @@ output = {
 * **Reads directly from the FS.** Body text is not cached in the Graph (SQLite) (design principle 1)
 * Always returns the current file state. Even if the `range` of a dirty Node is passed in, the current file content is returned (callers should be aware of possible line drift)
 * If `range` extends past the end of the file, the result is clipped
+
+## restart_lsp — force a language server to restart
+
+```
+input  = {
+  language?: string,   // if omitted, restart every provisioned language
+}
+output = {
+  restarted: string[], // languages whose server was actually reset
+}
+```
+
+* A **maintenance operation**, not a graph query — it returns no `Node`s and carries no `degraded`/`degrade_reason`/`lsp_status` fields (`docs/design/resilience.md`)
+* Gracefully shuts down the current server for `language` (or all servers, if omitted) and drops it from the pool; the *next* on-demand query for that language transparently respawns it via the same lazy-start path a first-ever query takes — no separate "warm it back up" step is needed
+* Exists because the automatic restart-on-failure policy ([lsp-lifecycle.md](./lsp-lifecycle.md)) only fires on detected crashes/timeouts — it does nothing for a server that's alive but wedged (e.g. serving stale/incomplete results without erroring). This is the only way to force recovery from that state short of restarting the whole process
+* No-op (returns `restarted: []`) if the named language (or, for the omit-language form, any language) was never acquired in the first place
 
 ## kind_label normalization
 
