@@ -125,6 +125,11 @@ pub struct FindSymbolInput {
     pub match_mode: MatchMode,
     #[serde(default)]
     pub ignore_case: bool,
+    /// Return only `fqns: string[]` instead of full `nodes: Node[]` — for
+    /// gauging match count / narrowing a pattern before paying for full
+    /// metadata on a wide result set.
+    #[serde(default)]
+    pub brief: bool,
     #[serde(flatten)]
     pub filter: FilterInput,
     #[serde(flatten)]
@@ -132,12 +137,13 @@ pub struct FindSymbolInput {
 }
 
 impl FindSymbolInput {
-    pub fn into_parts(self) -> Result<(String, MatchMode, bool, Filter, Page), ErrorData> {
+    pub fn into_parts(self) -> Result<(String, MatchMode, bool, bool, Filter, Page), ErrorData> {
         let page = self.page.into_page()?;
         Ok((
             self.pattern,
             self.match_mode,
             self.ignore_case,
+            self.brief,
             self.filter.into(),
             page,
         ))

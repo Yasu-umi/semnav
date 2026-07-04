@@ -46,10 +46,10 @@ impl SemnavServer {
         &self,
         Parameters(input): Parameters<FindSymbolInput>,
     ) -> Result<Json<FindSymbolResult>, ErrorData> {
-        let (pattern, mode, ignore_case, filter, page) = input.into_parts()?;
+        let (pattern, mode, ignore_case, brief, filter, page) = input.into_parts()?;
         let result = self
             .runtime
-            .find_symbol(&pattern, mode, ignore_case, &filter, &page)
+            .find_symbol(&pattern, mode, ignore_case, brief, &filter, &page)
             .await
             .map_err(internal_error)?;
         Ok(Json(result))
@@ -148,7 +148,10 @@ impl SemnavServer {
         &self,
         Parameters(input): Parameters<RestartLspInput>,
     ) -> Result<Json<RestartLspResult>, ErrorData> {
-        let restarted = self.runtime.restart_language(input.language.as_deref()).await;
+        let restarted = self
+            .runtime
+            .restart_language(input.language.as_deref())
+            .await;
         Ok(Json(RestartLspResult { restarted }))
     }
 }
@@ -190,6 +193,7 @@ mod tests {
             pattern: "repo".into(),
             match_mode: MatchMode::Segment,
             ignore_case: false,
+            brief: false,
             filter: Default::default(),
             page: Default::default(),
         };

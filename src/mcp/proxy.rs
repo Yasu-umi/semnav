@@ -156,7 +156,9 @@ mod tests {
                 _ => return,
             };
             let result = match &envelope.request {
-                DaemonRequest::FindSymbol(_) => Ok(serde_json::json!({"nodes": [], "next_cursor": null})),
+                DaemonRequest::FindSymbol(_) => {
+                    Ok(serde_json::json!({"nodes": [], "next_cursor": null}))
+                }
                 DaemonRequest::RestartLsp(_) => Ok(serde_json::json!({"restarted": ["python"]})),
                 _ => Err("unsupported in this fake".to_string()),
             };
@@ -184,6 +186,7 @@ mod tests {
             pattern: "repo".into(),
             match_mode: Default::default(),
             ignore_case: false,
+            brief: false,
             filter: Default::default(),
             page: Default::default(),
         };

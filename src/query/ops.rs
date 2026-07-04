@@ -20,23 +20,36 @@ use super::{QueryEngine, paginate};
 
 impl QueryEngine {
     /// List symbols whose fqn matches `pattern` under `mode`, narrowed by
-    /// `filter`, paginated by the stable sort key.
+    /// `filter`, paginated by the stable sort key. `brief` returns just the
+    /// matched `fqn`s instead of full nodes, for a much smaller payload when
+    /// a wide pattern (e.g. `match="contains"`) would otherwise return
+    /// hundreds of full `NodeDto`s.
     pub async fn find_symbol(
         &self,
         pattern: &str,
         mode: MatchMode,
         ignore_case: bool,
+        brief: bool,
         filter: &Filter,
         page: &Page,
     ) -> Result<FindSymbolResult> {
         let mut nodes = self.db.list_nodes(filter.language.as_deref()).await?;
         nodes.retain(|n| mode.matches(pattern, ignore_case, &n.fqn) && filter.matches(n));
         let (page_items, next) = paginate(nodes, page, SortKey::from_node);
-        let nodes_dto = page_items.iter().map(NodeDto::from_node).collect();
-        Ok(FindSymbolResult {
-            nodes: nodes_dto,
-            next_cursor: next.map(|c| c.encode()),
-        })
+        let next_cursor = next.map(|c| c.encode());
+        if brief {
+            Ok(FindSymbolResult {
+                nodes: Vec::new(),
+                fqns: page_items.into_iter().map(|n| n.fqn).collect(),
+                next_cursor,
+            })
+        } else {
+            Ok(FindSymbolResult {
+                nodes: page_items.iter().map(NodeDto::from_node).collect(),
+                fqns: Vec::new(),
+                next_cursor,
+            })
+        }
     }
 
     /// Read the source slice for lines `[start_line, end_line)` (0-based,
@@ -442,6 +455,7 @@ mod tests {
                 "helper",
                 MatchMode::Segment,
                 false,
+                false,
                 &Filter::default(),
                 &Page::default(),
             )
@@ -453,6 +467,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn find_symbol_brief_returns_fqns_not_nodes() {
+        let (engine, _mock) = scenario().await;
+        let res = engine
+            .find_symbol(
+                "",
+                MatchMode::Contains,
+                false,
+                true,
+                &Filter::default(),
+                &Page::default(),
+            )
+            .await
+            .unwrap();
+        assert!(res.nodes.is_empty());
+        assert_eq!(
+            res.fqns,
+            vec!["repo.caller".to_string(), "repo.helper".to_string()]
+        );
+    }
+
+    #[tokio::test]
     async fn find_symbol_paginates_with_cursor() {
         let (engine, _mock) = scenario().await;
         let page = Page {
@@ -460,7 +495,14 @@ mod tests {
             cursor: None,
         };
         let first = engine
-            .find_symbol("", MatchMode::Contains, false, &Filter::default(), &page)
+            .find_symbol(
+                "",
+                MatchMode::Contains,
+                false,
+                false,
+                &Filter::default(),
+                &page,
+            )
             .await
             .unwrap();
         assert_eq!(first.nodes.len(), 1);
@@ -471,6 +513,7 @@ mod tests {
             .find_symbol(
                 "",
                 MatchMode::Contains,
+                false,
                 false,
                 &Filter::default(),
                 &Page {

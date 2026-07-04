@@ -115,10 +115,17 @@ pub fn kind_label(node_kind: &str, construct: Option<&str>) -> String {
 // (Step 6) is a thin serializer over these; tests target the engine, not wire
 // framing. `next_cursor` is the opaque encoded [`crate::query::filter::Cursor`].
 
-/// `find_symbol` → a page of metadata nodes.
+/// `find_symbol` → a page of metadata nodes, or (when the request set
+/// `brief: true`) just their `fqn`s. Exactly one of `nodes`/`fqns` is
+/// non-empty for a given response — `brief` trades node metadata for a much
+/// smaller payload when a caller only needs to gauge match count or narrow a
+/// pattern before fetching full nodes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FindSymbolResult {
+    #[serde(default)]
     pub nodes: Vec<NodeDto>,
+    #[serde(default)]
+    pub fqns: Vec<String>,
     pub next_cursor: Option<String>,
 }
 

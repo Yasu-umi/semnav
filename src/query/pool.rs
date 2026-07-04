@@ -142,11 +142,12 @@ impl QueryRuntime {
         pattern: &str,
         mode: MatchMode,
         ignore_case: bool,
+        brief: bool,
         filter: &Filter,
         page: &Page,
     ) -> Result<FindSymbolResult> {
         self.engine
-            .find_symbol(pattern, mode, ignore_case, filter, page)
+            .find_symbol(pattern, mode, ignore_case, brief, filter, page)
             .await
     }
 
@@ -504,7 +505,10 @@ mod tests {
         let engine = QueryEngine::new(db, "file:///repo".into());
         let runtime = QueryRuntime::open(engine, dir.path().join("servers"));
 
-        assert_eq!(runtime.restart_language(Some("python")).await, Vec::<String>::new());
+        assert_eq!(
+            runtime.restart_language(Some("python")).await,
+            Vec::<String>::new()
+        );
         assert_eq!(runtime.restart_language(None).await, Vec::<String>::new());
     }
 

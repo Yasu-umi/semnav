@@ -95,6 +95,7 @@ mod tests {
                 pattern: "foo".into(),
                 match_mode: Default::default(),
                 ignore_case: false,
+                brief: false,
                 filter: FilterInput::default(),
                 page: PageInput::default(),
             }),
@@ -139,7 +140,10 @@ mod tests {
             // Debug-format comparison is enough here — the point is that
             // every variant round-trips through JSON without loss, not that
             // DaemonRequest implements PartialEq.
-            assert_eq!(format!("{:?}", received.request), format!("{:?}", envelope.request));
+            assert_eq!(
+                format!("{:?}", received.request),
+                format!("{:?}", envelope.request)
+            );
         }
     }
 

@@ -91,13 +91,15 @@ input  = {
   pattern:      string,
   match?:       "segment" | "contains" | "exact" = "segment",
   ignore_case?: bool = false,
+  brief?:       bool = false,
 } & Filter & Page
-output = { nodes: Node[], next_cursor?: string }
+output = { nodes: Node[], fqns: string[], next_cursor?: string }
 ```
 
 * **`match="segment"` (default)**: matches against **each segment** of the FQN split by its delimiter. `save` hits `app.repo.save` (trailing `save`), but not `preserve`. A default that's neither too broad nor too narrow
 * `contains`: substring match (`%save%`). Nothing is missed, but it also hits `preserve`
 * `exact`: exact FQN match
+* **`brief`**: when `true`, the response fills `fqns` (just the matched FQN strings) and leaves `nodes` empty, instead of the reverse. A wide `match="contains"` pattern can page through hundreds of full `Node`s (`range`/`signature`/`documentation`/...) and blow past a response token budget; `brief` lets a caller gauge match count or narrow the pattern first, before paying for full metadata.
 
 ### find_definition — usage position → declaration
 
