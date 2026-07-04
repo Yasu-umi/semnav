@@ -70,17 +70,42 @@ fn print_help() {
     );
 }
 
+/// Resolve a CLI `<root>` argument to an absolute, canonical, existing
+/// directory. Every subcommand must go through this: [`path_to_uri`] assumes
+/// an absolute path and has no way to detect a relative one, so an
+/// un-canonicalized root (e.g. `.`) silently produces a malformed
+/// `file:///.`-style URI. That URI round-trips through `uri_to_path` as
+/// filesystem-root-relative, so the indexer ends up walking `/` instead of
+/// the intended directory — canonicalizing here, once, before the path is
+/// ever turned into a URI, is what closes that off.
+fn resolve_root(root_arg: &str) -> Result<PathBuf, String> {
+    let root = PathBuf::from(root_arg)
+        .canonicalize()
+        .map_err(|e| format!("{root_arg}: {e}"))?;
+    if !root.is_dir() {
+        return Err(format!("{root_arg} is not a directory"));
+    }
+    Ok(root)
+}
+
 fn discover(args: &[String]) -> ExitCode {
-    let Some(root) = args.first() else {
+    let Some(root_arg) = args.first() else {
         eprintln!("usage: semnav discover <root>");
         return ExitCode::from(2);
     };
-    match discover_files(&PathBuf::from(root)) {
+    let root = match resolve_root(root_arg) {
+        Ok(root) => root,
+        Err(err) => {
+            eprintln!("discover: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match discover_files(&root) {
         Ok(uris) => {
             for uri in &uris {
                 println!("{uri}");
             }
-            eprintln!("{} source file(s) under {root}", uris.len());
+            eprintln!("{} source file(s) under {}", uris.len(), root.display());
             ExitCode::SUCCESS
         }
         Err(err) => {
@@ -95,11 +120,13 @@ fn index(args: &[String]) -> ExitCode {
         eprintln!("usage: semnav index <root>");
         return ExitCode::from(2);
     };
-    let root = PathBuf::from(root_arg);
-    if !root.is_dir() {
-        eprintln!("index: {root_arg} is not a directory");
-        return ExitCode::FAILURE;
-    }
+    let root = match resolve_root(root_arg) {
+        Ok(root) => root,
+        Err(err) => {
+            eprintln!("index: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
         Err(err) => {
@@ -115,11 +142,13 @@ fn serve(args: &[String]) -> ExitCode {
         eprintln!("usage: semnav serve <root>");
         return ExitCode::from(2);
     };
-    let root = PathBuf::from(root_arg);
-    if !root.is_dir() {
-        eprintln!("serve: {root_arg} is not a directory");
-        return ExitCode::FAILURE;
-    }
+    let root = match resolve_root(root_arg) {
+        Ok(root) => root,
+        Err(err) => {
+            eprintln!("serve: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
         Err(err) => {
@@ -309,7 +338,13 @@ fn daemon_cmd(args: &[String]) -> ExitCode {
             eprintln!("usage: semnav daemon stop <root>");
             return ExitCode::from(2);
         };
-        let root = PathBuf::from(root_arg);
+        let root = match resolve_root(root_arg) {
+            Ok(root) => root,
+            Err(err) => {
+                eprintln!("daemon stop: {err}");
+                return ExitCode::FAILURE;
+            }
+        };
         let runtime = match tokio::runtime::Runtime::new() {
             Ok(rt) => rt,
             Err(err) => {
@@ -324,11 +359,13 @@ fn daemon_cmd(args: &[String]) -> ExitCode {
         eprintln!("usage: semnav daemon <root>");
         return ExitCode::from(2);
     };
-    let root = PathBuf::from(root_arg);
-    if !root.is_dir() {
-        eprintln!("daemon: {root_arg} is not a directory");
-        return ExitCode::FAILURE;
-    }
+    let root = match resolve_root(root_arg) {
+        Ok(root) => root,
+        Err(err) => {
+            eprintln!("daemon: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
         Err(err) => {
@@ -565,5 +602,40 @@ async fn run_index(root: &Path) -> ExitCode {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    /// A root ending in a relative `.` component (as `discover_files`'s walker
+    /// would hand back verbatim, or a CLI arg like `some/dir/.`) must
+    /// canonicalize away the `.` — this is the exact shape that, unresolved,
+    /// turns into a malformed `file:///.`-style uri and makes the indexer walk
+    /// `/` instead of the intended directory.
+    #[test]
+    fn resolve_root_canonicalizes_relative_dot_component() {
+        let dir = tempdir().expect("tempdir");
+        let messy = dir.path().join(".");
+        let resolved = resolve_root(messy.to_str().unwrap()).expect("resolves");
+        assert_eq!(resolved, dir.path().canonicalize().unwrap());
+        assert!(!resolved.to_string_lossy().ends_with('.'));
+    }
+
+    #[test]
+    fn resolve_root_rejects_nonexistent_path() {
+        let err = resolve_root("/no/such/semnav-test-path-xyz").expect_err("must fail");
+        assert!(err.contains("/no/such/semnav-test-path-xyz"));
+    }
+
+    #[test]
+    fn resolve_root_rejects_a_file() {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("not_a_dir.txt");
+        std::fs::write(&file, "x").unwrap();
+        let err = resolve_root(file.to_str().unwrap()).expect_err("must fail");
+        assert!(err.contains("is not a directory"));
     }
 }
