@@ -280,6 +280,7 @@ impl QueryRuntime {
                 FindReferencesResult {
                     references: Vec::new(),
                     next_cursor: None,
+                    hint_fqns: self.engine.hint_fqns_for_symref(symref).await?,
                 },
                 degradation.or(timeout_degradation(timed_out)),
                 false,
@@ -364,6 +365,7 @@ impl QueryRuntime {
                 CallGraphResult {
                     items: Vec::new(),
                     next_cursor: None,
+                    hint_fqns: self.engine.hint_fqns_for_symref(symref).await?,
                 },
                 degradation.or(timeout_degradation(timed_out)),
                 false,
@@ -927,6 +929,148 @@ mod tests {
             runtime.supervisors.lock().unwrap().is_empty(),
             "no server spawned for an unknown fqn"
         );
+    }
+
+    /// A minimal persisted node for the `hint_fqns` tests below — only the
+    /// columns `hint_fqns_for`'s segment match and `NodeKind` filtering
+    /// actually read matter.
+    fn hint_test_node(fqn: &str, name: &str) -> Node {
+        Node {
+            id: None,
+            fqn: fqn.to_string(),
+            uri: "file:///repo/mod.py".to_string(),
+            name: name.to_string(),
+            language: "python".to_string(),
+            kind: 12,
+            node_kind: "Function".to_string(),
+            construct: None,
+            container_id: None,
+            range: crate::graph::Range {
+                start_line: 0,
+                start_col: 0,
+                end_line: 2,
+                end_col: 0,
+            },
+            sel: crate::graph::Range {
+                start_line: 0,
+                start_col: 4,
+                end_line: 0,
+                end_col: 4 + name.len() as i64,
+            },
+            signature: None,
+            documentation: None,
+            detail: None,
+            signature_hash: None,
+            valid: true,
+            orphan: false,
+            generation: 0,
+            is_external: false,
+        }
+    }
+
+    /// issue #3: `find_references({fqn: "helper"})` against a graph that only
+    /// has `repo.helper` must not look indistinguishable from "this symbol
+    /// genuinely has zero references" — `hint_fqns` should point at the FQN
+    /// the caller probably meant.
+    #[tokio::test]
+    async fn references_for_bare_name_hints_the_full_fqn() {
+        let dir = tempdir().unwrap();
+        let db = DbActor::spawn(&dir.path().join("g.db")).unwrap();
+        db.upsert_node(hint_test_node("repo.helper", "helper"))
+            .await
+            .unwrap();
+        let engine = QueryEngine::new(db, "file:///repo".into());
+        let runtime = QueryRuntime::open(engine, dir.path().join("servers"));
+
+        let (res, _, _) = runtime
+            .find_references(
+                &SymbolRef::Fqn("helper".into()),
+                &Filter::default(),
+                &Page::default(),
+            )
+            .await
+            .expect("degrades, not errors");
+        assert!(res.references.is_empty());
+        assert_eq!(res.hint_fqns, vec!["repo.helper".to_string()]);
+    }
+
+    /// `find_callers`'s mirror of the above.
+    #[tokio::test]
+    async fn callers_for_bare_name_hints_the_full_fqn() {
+        let dir = tempdir().unwrap();
+        let db = DbActor::spawn(&dir.path().join("g.db")).unwrap();
+        db.upsert_node(hint_test_node("repo.helper", "helper"))
+            .await
+            .unwrap();
+        let engine = QueryEngine::new(db, "file:///repo".into());
+        let runtime = QueryRuntime::open(engine, dir.path().join("servers"));
+
+        let (res, _, _) = runtime
+            .find_callers(
+                &SymbolRef::Fqn("helper".into()),
+                &Filter::default(),
+                &Page::default(),
+                false,
+            )
+            .await
+            .expect("degrades, not errors");
+        assert!(res.items.is_empty());
+        assert_eq!(res.hint_fqns, vec!["repo.helper".to_string()]);
+    }
+
+    /// A genuinely nonexistent name (no leaf-segment match anywhere in the
+    /// graph) must not fabricate a hint — an empty `hint_fqns` here is the
+    /// "provably no such symbol" signal, distinct from "wrong key" above.
+    #[tokio::test]
+    async fn callers_for_truly_unknown_name_has_no_hint() {
+        let dir = tempdir().unwrap();
+        let db = DbActor::spawn(&dir.path().join("g.db")).unwrap();
+        db.upsert_node(hint_test_node("repo.helper", "helper"))
+            .await
+            .unwrap();
+        let engine = QueryEngine::new(db, "file:///repo".into());
+        let runtime = QueryRuntime::open(engine, dir.path().join("servers"));
+
+        let (res, _, _) = runtime
+            .find_callers(
+                &SymbolRef::Fqn("totally_unrelated".into()),
+                &Filter::default(),
+                &Page::default(),
+                false,
+            )
+            .await
+            .expect("degrades, not errors");
+        assert!(res.hint_fqns.is_empty());
+    }
+
+    /// `hint_fqns` only applies to the `Fqn` branch — a failed `At` lookup is
+    /// a normal LSP-null outcome (`docs/design/mcp-tools.md`
+    /// "find_definition"), not a naming problem, so it must never be
+    /// populated there even when a same-named symbol exists elsewhere.
+    #[tokio::test]
+    async fn callers_for_unresolvable_at_position_has_no_hint() {
+        let dir = tempdir().unwrap();
+        let db = DbActor::spawn(&dir.path().join("g.db")).unwrap();
+        db.upsert_node(hint_test_node("repo.helper", "helper"))
+            .await
+            .unwrap();
+        let engine = QueryEngine::new(db, "file:///repo".into());
+        let runtime = QueryRuntime::open(engine, dir.path().join("servers"));
+
+        let (res, _, _) = runtime
+            .find_callers(
+                &SymbolRef::At {
+                    uri: "file:///repo/nope.py".into(),
+                    line: 0,
+                    character: 0,
+                },
+                &Filter::default(),
+                &Page::default(),
+                false,
+            )
+            .await
+            .expect("degrades, not errors");
+        assert!(res.hint_fqns.is_empty());
     }
 
     /// `restart_language` on a runtime that never acquired anything is a safe

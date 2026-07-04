@@ -22,7 +22,51 @@ use super::lsp_query::{LspQueryClient, is_timeout};
 use super::resolver::group_by_node;
 use super::{QueryEngine, paginate};
 
+/// Cap on `hint_fqns`/`from_hint_fqns`/`to_hint_fqns` candidates suggested
+/// when an `Fqn` `SymbolRef` resolves to no anchor (`docs/design/mcp-tools.md`
+/// "SymbolRef", issue #3) — bounded so a common leaf name (e.g. a bare
+/// `"main"`) can't blow up the response.
+const FQN_HINT_LIMIT: usize = 10;
+
 impl QueryEngine {
+    /// Suggest FQNs sharing `fqn`'s last dot-segment (the same signal
+    /// `find_symbol`'s default `match="segment"` uses), for the caller to
+    /// retry against `find_symbol` — `resolve_anchor_id`'s `Fqn` branch is a
+    /// strict exact match, so a bare or wrong-prefixed name otherwise looks
+    /// indistinguishable from "this symbol has zero results"
+    /// (`docs/design/mcp-tools.md` "SymbolRef", issue #3). Only ever invoked
+    /// on the already-rare anchor-not-found path, so the extra graph read
+    /// doesn't cost anything on the common case.
+    async fn hint_fqns_for(&self, fqn: &str) -> Result<Vec<String>> {
+        let leaf = fqn.rsplit('.').next().unwrap_or(fqn);
+        let mut fqns: Vec<String> = self
+            .db
+            .list_nodes(None)
+            .await?
+            .into_iter()
+            .filter(|n| !n.is_external && MatchMode::Segment.matches(leaf, false, &n.fqn))
+            .map(|n| n.fqn)
+            .collect();
+        fqns.sort();
+        fqns.dedup();
+        fqns.truncate(FQN_HINT_LIMIT);
+        Ok(fqns)
+    }
+
+    /// `hint_fqns_for` when `symref` is `Fqn`, empty for `At` (a position
+    /// failing to resolve isn't a naming problem — see
+    /// `docs/design/mcp-tools.md` "find_definition": "Null is a normal
+    /// outcome"). `pub(crate)`: `QueryRuntime` (`pool.rs`) reimplements
+    /// `find_references`/`find_callers`'s anchor resolution itself (for the
+    /// cache-first + background refresh contract) rather than delegating to
+    /// this module's `find_references`/`call_graph`, so it needs this too.
+    pub(crate) async fn hint_fqns_for_symref(&self, symref: &SymbolRef) -> Result<Vec<String>> {
+        match symref {
+            SymbolRef::Fqn(fqn) => self.hint_fqns_for(fqn).await,
+            SymbolRef::At { .. } => Ok(Vec::new()),
+        }
+    }
+
     /// List symbols whose fqn matches `pattern` under `mode`, narrowed by
     /// `filter`, paginated by the stable sort key. `brief` returns just the
     /// matched `fqn`s instead of full nodes, for a much smaller payload when
@@ -183,13 +227,16 @@ impl QueryEngine {
         page: &Page,
         client: Option<&C>,
     ) -> Result<(FindReferencesResult, bool)> {
-        let empty = || FindReferencesResult {
-            references: Vec::new(),
-            next_cursor: None,
-        };
         let (anchor_id, mut timed_out) = self.resolve_anchor_id(symref, client).await?;
         let Some((anchor_id, anchor)) = anchor_id else {
-            return Ok((empty(), timed_out));
+            return Ok((
+                FindReferencesResult {
+                    references: Vec::new(),
+                    next_cursor: None,
+                    hint_fqns: self.hint_fqns_for_symref(symref).await?,
+                },
+                timed_out,
+            ));
         };
         if let Some(client) = client {
             self.ensure_open(&anchor.uri, client).await;
@@ -218,6 +265,7 @@ impl QueryEngine {
             FindReferencesResult {
                 references,
                 next_cursor: next.map(|c| c.encode()),
+                hint_fqns: Vec::new(),
             },
             timed_out,
         ))
@@ -253,13 +301,16 @@ impl QueryEngine {
         page: &Page,
         client: Option<&C>,
     ) -> Result<(CallGraphResult, bool)> {
-        let empty = || CallGraphResult {
-            items: Vec::new(),
-            next_cursor: None,
-        };
         let (anchor_id, mut timed_out) = self.resolve_anchor_id(symref, client).await?;
         let Some((anchor_id, anchor)) = anchor_id else {
-            return Ok((empty(), timed_out));
+            return Ok((
+                CallGraphResult {
+                    items: Vec::new(),
+                    next_cursor: None,
+                    hint_fqns: self.hint_fqns_for_symref(symref).await?,
+                },
+                timed_out,
+            ));
         };
         if let Some(client) = client {
             // Read once and reuse for both `didOpen` and the freshness hash,
@@ -326,14 +377,39 @@ impl QueryEngine {
             reachable: false,
             path: Vec::new(),
             limit_reached,
+            from_hint_fqns: Vec::new(),
+            to_hint_fqns: Vec::new(),
         };
         let (from_anchor, from_timed_out) = self.resolve_anchor_id(from, client).await?;
         let (to_anchor, to_timed_out) = self.resolve_anchor_id(to, client).await?;
         let mut timed_out = from_timed_out || to_timed_out;
-        let (Some((from_id, from_node)), Some((to_id, _))) = (from_anchor, to_anchor) else {
-            // An unresolvable endpoint isn't a search limit — there's nothing
-            // to search from/for.
-            return Ok((not_found(false), timed_out));
+        let (from_id, from_node, to_id) = match (from_anchor, to_anchor) {
+            (Some((from_id, from_node)), Some((to_id, _))) => (from_id, from_node, to_id),
+            (from_anchor, to_anchor) => {
+                // An unresolvable endpoint isn't a search limit — there's
+                // nothing to search from/for. Each endpoint's hint is
+                // computed independently since either (or both) can fail.
+                let from_hint_fqns = if from_anchor.is_none() {
+                    self.hint_fqns_for_symref(from).await?
+                } else {
+                    Vec::new()
+                };
+                let to_hint_fqns = if to_anchor.is_none() {
+                    self.hint_fqns_for_symref(to).await?
+                } else {
+                    Vec::new()
+                };
+                return Ok((
+                    FindCallPathResult {
+                        reachable: false,
+                        path: Vec::new(),
+                        limit_reached: false,
+                        from_hint_fqns,
+                        to_hint_fqns,
+                    },
+                    timed_out,
+                ));
+            }
         };
         if from_id == to_id {
             return Ok((
@@ -341,6 +417,8 @@ impl QueryEngine {
                     reachable: true,
                     path: vec![NodeDto::from_node(&from_node)],
                     limit_reached: false,
+                    from_hint_fqns: Vec::new(),
+                    to_hint_fqns: Vec::new(),
                 },
                 timed_out,
             ));
@@ -383,6 +461,8 @@ impl QueryEngine {
                             reachable: true,
                             path: found_path.iter().map(NodeDto::from_node).collect(),
                             limit_reached: false,
+                            from_hint_fqns: Vec::new(),
+                            to_hint_fqns: Vec::new(),
                         },
                         timed_out,
                     ));
@@ -454,13 +534,16 @@ impl QueryEngine {
         page: &Page,
         client: Option<&C>,
     ) -> Result<(CallGraphResult, bool)> {
-        let empty = || CallGraphResult {
-            items: Vec::new(),
-            next_cursor: None,
-        };
         let (anchor_id, mut timed_out) = self.resolve_anchor_id(symref, client).await?;
         let Some((anchor_id, anchor)) = anchor_id else {
-            return Ok((empty(), timed_out));
+            return Ok((
+                CallGraphResult {
+                    items: Vec::new(),
+                    next_cursor: None,
+                    hint_fqns: self.hint_fqns_for_symref(symref).await?,
+                },
+                timed_out,
+            ));
         };
         if let Some(client) = client {
             self.ensure_open(&anchor.uri, client).await;
@@ -502,6 +585,7 @@ impl QueryEngine {
         Ok(CallGraphResult {
             items,
             next_cursor: next.map(|c| c.encode()),
+            hint_fqns: Vec::new(),
         })
     }
 
@@ -546,6 +630,7 @@ impl QueryEngine {
         Ok(FindReferencesResult {
             references,
             next_cursor: next.map(|c| c.encode()),
+            hint_fqns: Vec::new(),
         })
     }
 
@@ -1361,6 +1446,43 @@ mod tests {
         );
     }
 
+    /// issue #3: a bare/wrong-prefixed `fqn` that fails the exact-match
+    /// anchor lookup gets a `hint_fqns` pointing at the FQN the caller
+    /// probably meant, instead of looking indistinguishable from "this
+    /// symbol has zero callees."
+    #[tokio::test]
+    async fn find_callees_unresolvable_fqn_hints_similarly_named_symbol() {
+        let (engine, _mock) = scenario().await;
+        let (res, _) = engine
+            .find_callees(
+                &SymbolRef::Fqn("helper".into()),
+                &Filter::default(),
+                &Page::default(),
+                None::<&MockLspQueryClient>,
+            )
+            .await
+            .unwrap();
+        assert!(res.items.is_empty());
+        assert_eq!(res.hint_fqns, vec!["repo.helper".to_string()]);
+    }
+
+    /// A genuinely nonexistent name gets no hint — an empty `hint_fqns` is the
+    /// "provably no such symbol" signal, distinct from "wrong key" above.
+    #[tokio::test]
+    async fn find_callees_unknown_fqn_has_no_hint() {
+        let (engine, _mock) = scenario().await;
+        let (res, _) = engine
+            .find_callees(
+                &SymbolRef::Fqn("totally_unrelated".into()),
+                &Filter::default(),
+                &Page::default(),
+                None::<&MockLspQueryClient>,
+            )
+            .await
+            .unwrap();
+        assert!(res.hint_fqns.is_empty());
+    }
+
     #[tokio::test]
     async fn references_excludes_external_by_default_filter() {
         let (engine, _mock) = scenario().await;
@@ -1784,5 +1906,29 @@ mod tests {
             !res.limit_reached,
             "an unresolvable endpoint means there's nothing to search, not that a search was cut short"
         );
+    }
+
+    /// issue #3: `from`/`to` are hinted independently — a bare name that
+    /// matches an existing leaf segment gets a suggestion, a name that
+    /// matches nothing gets none, in the same call.
+    #[tokio::test]
+    async fn find_call_path_unresolvable_endpoints_hint_independently() {
+        let (engine, mock) = chain_scenario().await;
+        let (res, _) = engine
+            .find_call_path(
+                &SymbolRef::Fqn("nope".into()),
+                &SymbolRef::Fqn("a".into()),
+                10,
+                10,
+                Some(&mock),
+            )
+            .await
+            .unwrap();
+        assert!(!res.reachable);
+        assert!(
+            res.from_hint_fqns.is_empty(),
+            "\"nope\" matches no leaf segment anywhere in the graph"
+        );
+        assert_eq!(res.to_hint_fqns, vec!["repo.a".to_string()]);
     }
 }

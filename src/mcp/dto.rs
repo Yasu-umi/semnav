@@ -383,6 +383,8 @@ impl From<(FindReferencesResult, Option<Degradation>, bool)> for FindReferencesO
 pub struct FindCallersOutput {
     pub callers: Vec<CallGraphNode>,
     pub next_cursor: Option<String>,
+    #[serde(default)]
+    pub hint_fqns: Vec<String>,
     #[serde(flatten)]
     pub degrade: Option<DegradeInfo>,
     #[serde(flatten)]
@@ -396,6 +398,7 @@ impl From<(CallGraphResult, Option<Degradation>, bool)> for FindCallersOutput {
         FindCallersOutput {
             callers: result.items,
             next_cursor: result.next_cursor,
+            hint_fqns: result.hint_fqns,
             degrade: degradation.map(DegradeInfo::from),
             freshness: refreshing.then_some(FreshnessInfo { refreshing: true }),
         }
@@ -407,6 +410,8 @@ impl From<(CallGraphResult, Option<Degradation>, bool)> for FindCallersOutput {
 pub struct FindCalleesOutput {
     pub callees: Vec<CallGraphNode>,
     pub next_cursor: Option<String>,
+    #[serde(default)]
+    pub hint_fqns: Vec<String>,
     #[serde(flatten)]
     pub degrade: Option<DegradeInfo>,
 }
@@ -416,6 +421,7 @@ impl From<(CallGraphResult, Option<Degradation>)> for FindCalleesOutput {
         FindCalleesOutput {
             callees: result.items,
             next_cursor: result.next_cursor,
+            hint_fqns: result.hint_fqns,
             degrade: degradation.map(DegradeInfo::from),
         }
     }
@@ -651,6 +657,7 @@ mod tests {
         let result = CallGraphResult {
             items: vec![],
             next_cursor: None,
+            hint_fqns: Vec::new(),
         };
         let output: FindCallersOutput = (result, None, false).into();
         let v = serde_json::to_value(&output).unwrap();

@@ -155,10 +155,18 @@ pub struct ReferenceGroup {
 
 /// `find_references` → referencing nodes grouped by their declaration, plus the
 /// continuation cursor.
+///
+/// `hint_fqns` is non-empty only when the request's `SymbolRef` was `Fqn` and
+/// it resolved to no anchor at all — candidate FQNs sharing the requested
+/// name's last dot-segment, so a bare/wrong-prefixed `fqn` doesn't look
+/// indistinguishable from "this symbol genuinely has zero references"
+/// (`docs/design/mcp-tools.md` "SymbolRef", issue #3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FindReferencesResult {
     pub references: Vec<ReferenceGroup>,
     pub next_cursor: Option<String>,
+    #[serde(default)]
+    pub hint_fqns: Vec<String>,
 }
 
 /// One entry in a `find_callers`/`find_callees` page: the adjacent callable and
@@ -172,10 +180,15 @@ pub struct CallGraphNode {
 /// `find_callers`/`find_callees` → adjacent callables grouped by their
 /// declaration, plus the continuation cursor. The rmcp layer renames `items` to
 /// `callers`/`callees` per the tool contract.
+///
+/// `hint_fqns`: see [`FindReferencesResult::hint_fqns`] — same contract, same
+/// "anchor never resolved" trigger.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct CallGraphResult {
     pub items: Vec<CallGraphNode>,
     pub next_cursor: Option<String>,
+    #[serde(default)]
+    pub hint_fqns: Vec<String>,
 }
 
 /// `find_call_path` → BFS reachability from one symbol to another over
@@ -189,11 +202,18 @@ pub struct CallGraphResult {
 /// caller must treat `{reachable: false, limit_reached: true}` as "not found
 /// within these limits," not as a proven negative; only `{reachable: false,
 /// limit_reached: false}` means the search was exhaustive.
+/// `from_hint_fqns`/`to_hint_fqns`: see [`FindReferencesResult::hint_fqns`] —
+/// same contract, evaluated independently per endpoint since either (or both)
+/// of `from`/`to` can fail to resolve.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FindCallPathResult {
     pub reachable: bool,
     pub path: Vec<NodeDto>,
     pub limit_reached: bool,
+    #[serde(default)]
+    pub from_hint_fqns: Vec<String>,
+    #[serde(default)]
+    pub to_hint_fqns: Vec<String>,
 }
 
 #[cfg(test)]

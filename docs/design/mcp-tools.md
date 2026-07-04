@@ -36,10 +36,16 @@ SymbolRef =
   | { at: { uri: string, line: uint, character: uint } }  // any occurrence position (LSP-native, robust to staleness)
 ```
 
-* `fqn`: the normalized FQN matching the `fqn` column in [graph-model.md](./graph-model.md)
+* `fqn`: the normalized FQN matching the `fqn` column in [graph-model.md](./graph-model.md) — **exact match only** (unlike `find_symbol`'s `pattern`, which defaults to matching any dot-delimited segment). A bare or wrong-prefixed name doesn't resolve; see `hint_fqns` below
 * `at`: **any occurrence position** of the symbol (declaration, reference, or call site). The Graph resolves it to the node containing that position
 
-Reason both modes are supported: agents want to ask both "what's the definition at this reference position?" (position) and "who calls the function named `save`?" (name). Position stays accurate even mid-rename; FQN is human-readable.
+Reason both modes are supported: agents want to ask both "what's the definition at this reference position?" (position) and "who calls `app.repo.save` (the full FQN)?" (name). Position stays accurate even mid-rename; FQN is human-readable but must be exact.
+
+### `hint_fqns` — recovering from a wrong `fqn`
+
+`find_references`/`find_callers`/`find_callees`/`find_call_path` all resolve a `SymbolRef::Fqn` via the same exact-match lookup. Since a caller often knows a symbol's short name but not its full FQN, a bare or wrong-prefixed `fqn` would otherwise return an empty result indistinguishable from "this symbol genuinely has zero callers/references" (issue #3).
+
+Whenever that lookup finds no anchor at all, the response's `hint_fqns` (`find_call_path`: `from_hint_fqns`/`to_hint_fqns`, evaluated independently per endpoint) is filled with FQNs sharing the requested name's last dot-segment — the same signal `find_symbol`'s default `match="segment"` uses — capped at 10 entries. An empty `hint_fqns` on a no-anchor result means no similarly-named symbol exists either; a non-empty one is a pointer to retry with `find_symbol` or the suggested FQN directly. `hint_fqns` never applies to `at`: an unresolvable position is a normal LSP-null outcome, not a naming problem.
 
 ### Filter (optional parameter for all find_* tools)
 
@@ -121,6 +127,7 @@ input  = SymbolRef & Filter & Page
 output = {
   references: [{ node: Node, sites: Range[] }][],   // node=referencing site, sites=reference positions within that same file
   next_cursor?: string,
+  hint_fqns: string[],  // non-empty only when `fqn` resolved to no anchor at all — see "hint_fqns" above
   refreshing?: bool,    // true only when a background refresh was kicked off; see resilience.md
 }
 ```
@@ -137,6 +144,7 @@ input  = SymbolRef & Filter & Page & { with_signature?: bool = false }
 output = {
   callers: [{ node: Node, call_sites: Range[] }][],   // node=caller, call_sites=positions where the call occurs
   next_cursor?: string,
+  hint_fqns: string[],  // non-empty only when `fqn` resolved to no anchor at all — see "hint_fqns" above
   refreshing?: bool,    // true only when a background refresh was kicked off; see resilience.md
 }
 ```
@@ -154,6 +162,7 @@ input  = SymbolRef & Filter & Page & { with_signature?: bool = false }
 output = {
   callees: [{ node: Node, call_sites: Range[] }][],   // node=call target, call_sites=positions where the call occurs within that function
   next_cursor?: string,
+  hint_fqns: string[],  // non-empty only when `fqn` resolved to no anchor at all — see "hint_fqns" above
 }
 ```
 
@@ -172,9 +181,11 @@ input  = {
   max_lsp_calls?: uint = 30,  // clamped to [0, 200]
 }
 output = {
-  reachable:     bool,
-  path:          Node[],      // from -> ... -> to inclusive; empty when reachable=false
-  limit_reached: bool,
+  reachable:      bool,
+  path:           Node[],      // from -> ... -> to inclusive; empty when reachable=false
+  limit_reached:  bool,
+  from_hint_fqns: string[],    // non-empty only when `from` resolved to no anchor at all — see "hint_fqns" above
+  to_hint_fqns:   string[],    // same, for `to`; evaluated independently — either or both can be non-empty
 }
 ```
 
