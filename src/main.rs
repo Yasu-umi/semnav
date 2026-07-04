@@ -13,7 +13,9 @@ use rmcp::ServiceExt;
 use semnav::adapters::adapter_for_language;
 use semnav::daemon;
 use semnav::graph::DbActor;
-use semnav::indexer::{FsWatcher, discover_files, index_language, path_to_uri};
+use semnav::indexer::{
+    FsWatcher, discover_files, index_language, path_to_uri, reconcile_startup_drift,
+};
 use semnav::mcp::{ProxyServer, SemnavServer};
 use semnav::query::{QueryEngine, QueryRuntime};
 
@@ -452,13 +454,37 @@ async fn run_daemon(root: &Path) -> ExitCode {
     let query_runtime = Arc::new(QueryRuntime::open(engine, servers_dir));
     let semnav_server = SemnavServer::new(query_runtime.clone());
 
-    let watcher = FsWatcher::spawn(db, query_runtime.clone(), root.to_path_buf(), root_uri)
-        .inspect_err(|err| {
-            eprintln!(
-                "daemon: fs watcher failed to start (continuing without live invalidation): {err:#}"
-            );
-        })
-        .ok();
+    let watcher = FsWatcher::spawn(
+        db.clone(),
+        query_runtime.clone(),
+        root.to_path_buf(),
+        root_uri.clone(),
+    )
+    .inspect_err(|err| {
+        eprintln!(
+            "daemon: fs watcher failed to start (continuing without live invalidation): {err:#}"
+        );
+    })
+    .ok();
+
+    // Catch up on drift the watcher couldn't have seen — changes made while
+    // this root had no daemon running at all (`docs/design/daemon-lifecycle.md`
+    // "Startup drift reconciliation"). Backgrounded so a large repo doesn't
+    // delay this daemon accepting connections; queries in the meantime just
+    // see the same pre-existing snapshot they always would have.
+    let drift_root = root.to_path_buf();
+    tokio::spawn({
+        let db = db.clone();
+        let query_runtime = query_runtime.clone();
+        let root_uri = root_uri.clone();
+        async move {
+            if let Err(err) =
+                reconcile_startup_drift(&db, &query_runtime, &drift_root, &root_uri).await
+            {
+                eprintln!("daemon: startup drift reconcile failed: {err:#}");
+            }
+        }
+    });
 
     let shutdown_rx = install_shutdown_signal();
     let idle_timeout = daemon::server::idle_timeout_from_env();

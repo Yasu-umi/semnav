@@ -15,6 +15,7 @@ pub use discovery::{discover_files, path_to_uri, uri_to_path};
 pub(crate) use fetch::request_document_symbols;
 pub use fetch::{LspSymbolFetcher, SymbolFetcher};
 pub use pipeline::{IndexStats, index_repository};
+pub use reconcile::reconcile_startup_drift;
 pub use runner::index_language;
 pub use symbol::{
     DocumentSymbol, FlatSymbol, LspPosition, LspRange, flatten_document_symbols,

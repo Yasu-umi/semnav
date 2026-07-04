@@ -76,6 +76,21 @@ The daemon tracks active connection count and, whenever it drops to zero, the ti
 
 Either shutdown path (idle, explicit stop, or SIGTERM) runs the same teardown sequence `run_serve` used to run itself: `watcher.shutdown().await` then `query_runtime.shutdown_all().await`, then remove `daemon.sock`/`daemon.pid` and release the lock.
 
+## Startup drift reconciliation
+
+`FsWatcher` only reacts to fs events it's actually subscribed for, so any change made while *no* daemon was running for a root — explicit stop, crash, or simply editing files between `semnav index` and the first `semnav daemon` start — is invisible to it: the graph stays frozen at whatever it looked like the last time a daemon was watching, with no error and no `Degradation` signal (github.com/Yasu-umi/semnav/issues/4).
+
+`run_daemon` closes this gap on every startup, right after `FsWatcher::spawn`: it kicks off `reconcile_startup_drift` (`src/indexer/reconcile.rs`) as a detached background task, *before* the daemon starts accepting connections. It:
+
+1. Walks `root` with the same `discover_files` the indexer uses.
+2. Reads every uri the graph already has non-orphan nodes for (`DbActor::known_uris`).
+3. Unions the two sets — the walk alone would miss a file deleted during the gap, since it no longer exists to be discovered; only a uri the graph still remembers can drive that file's nodes through the orphan path.
+4. Runs each uri through the same `reconcile_uri` the live watcher uses, yielding to foreground queries via `wait_until_query_idle` between files, matching the watcher's own live-query-priority gate.
+
+This is deliberately **not** git-based — semnav has no requirement that `root` be a git repo, and uncommitted/untracked edits (exactly what a live coding session produces) wouldn't show up in a commit-level diff anyway. Drift is a per-file, git-agnostic concept here, same as the rest of the invalidation flow (`indexing-and-cache.md` "Cache Invalidation").
+
+It runs in the background rather than blocking `daemon::server::run`, so a large repo doesn't delay this daemon accepting connections — a query landing mid-reconcile just sees the same pre-existing snapshot it would have seen anyway, not a new failure mode. Each file pays a full LSP round-trip (`ensure_document` + `documentSymbol`) regardless of whether it actually changed — diffing happens *after* the fetch, inside `reconcile_file_symbols` — so this is closer in cost to a full re-index pass than to the live watcher's normal one-file-at-a-time trickle. Acceptable for 0.0.1's per-file-mtime-free design; a future revision could track a per-file mtime/hash in `index_meta` to skip files that provably haven't changed, avoiding the LSP round-trip entirely for the common case where the daemon was down only briefly.
+
 ## Known risks (accepted, not solved here)
 
 * **A daemon panic before its teardown sequence runs can still orphan LSP children.** `kill_on_drop(true)` on the LSP child `Command` (`src/lsp/server.rs`) is a backstop for the case where the owning `Child` handle is dropped during an unwind, but a `kill -9` on the daemon itself can't run any cleanup code, Rust or otherwise — same residual risk as any long-lived supervisor process in any language. Mitigation is operational: prefer `daemon stop` over `kill -9`, and if a daemon is ever killed that way, `pkill -f pyright-langserver`/`pkill -f typescript-language-server` cleans up stragglers manually.

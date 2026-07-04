@@ -38,7 +38,7 @@ The Graph is a cache. On source code changes, rather than rebuilding the entire 
 
 ### 0.0.1 Invalidation Flow
 
-File changes are detected via the FS watcher (`notify`):
+File changes are detected via the FS watcher (`notify`). This only covers changes made *while a daemon is watching* — drift from before that (daemon stopped/crashed, or edits between `semnav index` and the first `semnav daemon` start) is caught separately at daemon startup, not by the watcher; see [daemon-lifecycle.md](./daemon-lifecycle.md#startup-drift-reconciliation):
 
 ```
 File change detected (notify)

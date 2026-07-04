@@ -152,6 +152,14 @@ pub enum DbCommand {
         anchor_id: i64,
         reply: oneshot::Sender<Result<()>>,
     },
+    /// Distinct `uri`s of every non-orphan node, i.e. every file the graph
+    /// currently believes exists (`docs/design/daemon-lifecycle.md` "Startup
+    /// drift reconciliation"). Used to catch deletions a startup drift pass
+    /// wouldn't otherwise see, since a fresh `discover_files` walk only lists
+    /// files that still exist on disk.
+    KnownUris {
+        reply: oneshot::Sender<Result<Vec<String>>>,
+    },
 }
 
 /// Handle to the db actor. Cheap to clone (just an `mpsc::Sender`).
@@ -285,6 +293,10 @@ impl DbActor {
                 }
                 DbCommand::InvalidateOutgoingCalls { anchor_id, reply } => {
                     let res = invalidate_outgoing_calls(&conn, anchor_id);
+                    let _ = reply.send(res);
+                }
+                DbCommand::KnownUris { reply } => {
+                    let res = known_uris(&conn);
                     let _ = reply.send(res);
                 }
             }
@@ -543,6 +555,17 @@ impl DbActor {
             .map_err(|_| anyhow!("db actor closed"))?;
         rx.await.map_err(|_| anyhow!("db actor dropped reply"))?
     }
+
+    /// Distinct `uri`s of every non-orphan node — every file the graph
+    /// currently believes exists.
+    pub async fn known_uris(&self) -> Result<Vec<String>> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbCommand::KnownUris { reply: tx })
+            .await
+            .map_err(|_| anyhow!("db actor closed"))?;
+        rx.await.map_err(|_| anyhow!("db actor dropped reply"))?
+    }
 }
 
 fn apply_pragmas(conn: &Connection) -> Result<()> {
@@ -716,6 +739,17 @@ fn list_nodes(conn: &Connection, language: Option<&str>) -> Result<Vec<Node>> {
         }
     };
     Ok(nodes)
+}
+
+const KNOWN_URIS_SQL: &str = "SELECT DISTINCT uri FROM nodes WHERE orphan = 0";
+
+/// Distinct `uri`s of every non-orphan node.
+fn known_uris(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(KNOWN_URIS_SQL)?;
+    let uris = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(uris)
 }
 
 /// Resolve the smallest valid node whose declaration range contains `(line, col)`
@@ -2109,6 +2143,31 @@ mod tests {
         let py_only = actor.list_nodes(Some("python")).await.unwrap();
         assert_eq!(py_only.len(), 1);
         assert_eq!(py_only[0].fqn, "a.A");
+    }
+
+    #[tokio::test]
+    async fn known_uris_excludes_orphans_and_dedupes_per_file() {
+        let dir = tempdir().expect("tempdir");
+        let actor = DbActor::spawn(&dir.path().join("graph.db")).expect("spawn");
+
+        let mut a1 = node_with("a.A", "A", 0);
+        a1.uri = "file:///app/a.py".to_string();
+        let mut a2 = node_with("a.B", "B", 5);
+        a2.uri = "file:///app/a.py".to_string();
+        let mut b = node_with("b.C", "C", 0);
+        b.uri = "file:///app/b.py".to_string();
+        b.orphan = true;
+        actor.upsert_node(a1).await.unwrap();
+        actor.upsert_node(a2).await.unwrap();
+        actor.upsert_node(b).await.unwrap();
+
+        let mut uris = actor.known_uris().await.unwrap();
+        uris.sort();
+        assert_eq!(
+            uris,
+            vec!["file:///app/a.py".to_string()],
+            "a.py's two nodes collapse to one uri; b.py is orphaned and excluded"
+        );
     }
 
     #[tokio::test]
