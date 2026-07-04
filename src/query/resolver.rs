@@ -370,7 +370,11 @@ mod tests {
     #[tokio::test]
     async fn definition_anchor_falls_back_to_position_and_reports_timeout() {
         let engine = engine();
-        engine.db().upsert_node(node("repo.helper", 0)).await.unwrap();
+        engine
+            .db()
+            .upsert_node(node("repo.helper", 0))
+            .await
+            .unwrap();
 
         let mut mock = MockLspQueryClient::new();
         mock.timeout_ops.insert("definition");

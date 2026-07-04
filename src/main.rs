@@ -42,10 +42,14 @@ fn print_help() {
     eprintln!("  semnav discover <root>   list source files (Python/TS/Rust) under <root>");
     eprintln!("  semnav index <root>      index <root> into <root>/.semnav/graph.db");
     eprintln!("                           (provisions pyright/tsserver via npm, needs node + npm;");
-    eprintln!("                            rust-analyzer must already be on PATH, e.g. via rustup)");
+    eprintln!(
+        "                            rust-analyzer must already be on PATH, e.g. via rustup)"
+    );
     eprintln!("  semnav serve <root>      serve the 7 MCP tools over stdio, proxied to a");
     eprintln!("                           background daemon (auto-started; run `index` first)");
-    eprintln!("  semnav daemon <root>     run the persistent daemon directly (usually auto-started by `serve`)");
+    eprintln!(
+        "  semnav daemon <root>     run the persistent daemon directly (usually auto-started by `serve`)"
+    );
     eprintln!("  semnav daemon stop <root> stop a running daemon for <root>");
     eprintln!();
     eprintln!("environment:");
@@ -56,9 +60,7 @@ fn print_help() {
     eprintln!(
         "  SEMNAV_INITIALIZE_TIMEOUT_SECS         LSP `initialize` handshake timeout (default 60)"
     );
-    eprintln!(
-        "  SEMNAV_DOCUMENT_SYMBOL_TIMEOUT_SECS    LSP `documentSymbol` timeout (default 30)"
-    );
+    eprintln!("  SEMNAV_DOCUMENT_SYMBOL_TIMEOUT_SECS    LSP `documentSymbol` timeout (default 30)");
     eprintln!(
         "  SEMNAV_QUERY_TIMEOUT_SECS              query-time LSP round-trip timeout (default 150)"
     );
@@ -292,8 +294,7 @@ fn spawn_detached_daemon(root: &Path, cache_dir: &Path) -> Result<(), String> {
 async fn wait_for_daemon_ready(cache_dir: &Path) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + DAEMON_STARTUP_TIMEOUT;
     loop {
-        if daemon::discovery::probe_liveness(cache_dir).await == daemon::discovery::Liveness::Live
-        {
+        if daemon::discovery::probe_liveness(cache_dir).await == daemon::discovery::Liveness::Live {
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
@@ -481,7 +482,8 @@ async fn run_daemon(root: &Path) -> ExitCode {
 /// is running — safe to call defensively.
 async fn run_daemon_stop(root: &Path) -> ExitCode {
     let cache_dir = resolve_cache_dir(root);
-    if daemon::discovery::probe_liveness(&cache_dir).await == daemon::discovery::Liveness::NotRunning
+    if daemon::discovery::probe_liveness(&cache_dir).await
+        == daemon::discovery::Liveness::NotRunning
     {
         eprintln!("daemon stop: no daemon running for {}", root.display());
         return ExitCode::SUCCESS;
@@ -509,7 +511,9 @@ async fn run_daemon_stop(root: &Path) -> ExitCode {
         return ExitCode::FAILURE;
     }
     let _: Option<daemon::protocol::DaemonResponseEnvelope> =
-        daemon::protocol::read_line(&mut reader).await.unwrap_or(None);
+        daemon::protocol::read_line(&mut reader)
+            .await
+            .unwrap_or(None);
 
     for _ in 0..50 {
         if daemon::discovery::probe_liveness(&cache_dir).await

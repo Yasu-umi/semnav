@@ -322,7 +322,9 @@ pub struct FindCallersOutput {
 }
 
 impl From<(CallGraphResult, Option<Degradation>, bool)> for FindCallersOutput {
-    fn from((result, degradation, refreshing): (CallGraphResult, Option<Degradation>, bool)) -> Self {
+    fn from(
+        (result, degradation, refreshing): (CallGraphResult, Option<Degradation>, bool),
+    ) -> Self {
         FindCallersOutput {
             callers: result.items,
             next_cursor: result.next_cursor,

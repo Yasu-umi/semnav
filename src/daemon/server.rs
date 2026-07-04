@@ -19,7 +19,9 @@ use tokio::sync::{mpsc, watch};
 
 use crate::mcp::SemnavServer;
 
-use super::protocol::{DaemonEnvelope, DaemonRequest, DaemonResponseEnvelope, read_line, write_line};
+use super::protocol::{
+    DaemonEnvelope, DaemonRequest, DaemonResponseEnvelope, read_line, write_line,
+};
 
 /// Default idle window before a daemon with zero active connections
 /// self-terminates. Overridden by `SEMNAV_DAEMON_IDLE_TIMEOUT_SECS`.
@@ -172,7 +174,10 @@ async fn handle_connection(
 
 /// Route one request to the matching `SemnavServer` inherent method, reducing
 /// its `Result<Json<T>, ErrorData>` to the protocol's `Result<Value, String>`.
-async fn dispatch(semnav_server: &SemnavServer, request: DaemonRequest) -> Result<serde_json::Value, String> {
+async fn dispatch(
+    semnav_server: &SemnavServer,
+    request: DaemonRequest,
+) -> Result<serde_json::Value, String> {
     match request {
         DaemonRequest::FindSymbol(input) => {
             to_result(semnav_server.find_symbol(Parameters(input)).await)
@@ -200,7 +205,9 @@ async fn dispatch(semnav_server: &SemnavServer, request: DaemonRequest) -> Resul
     }
 }
 
-fn to_result<T: Serialize>(outcome: Result<Json<T>, ErrorData>) -> Result<serde_json::Value, String> {
+fn to_result<T: Serialize>(
+    outcome: Result<Json<T>, ErrorData>,
+) -> Result<serde_json::Value, String> {
     match outcome {
         Ok(Json(value)) => serde_json::to_value(value).map_err(|e| e.to_string()),
         Err(err) => Err(err.message.to_string()),
@@ -235,8 +242,14 @@ mod tests {
         let disconnect_at = t0 + Duration::from_secs(100);
         tracker.on_disconnect(disconnect_at);
         // Not yet timed out relative to the disconnect time, not t0.
-        assert!(!tracker.should_shut_down(disconnect_at + Duration::from_secs(10), Duration::from_secs(60)));
-        assert!(tracker.should_shut_down(disconnect_at + Duration::from_secs(61), Duration::from_secs(60)));
+        assert!(!tracker.should_shut_down(
+            disconnect_at + Duration::from_secs(10),
+            Duration::from_secs(60)
+        ));
+        assert!(tracker.should_shut_down(
+            disconnect_at + Duration::from_secs(61),
+            Duration::from_secs(60)
+        ));
     }
 
     #[test]
@@ -277,7 +290,9 @@ mod tests {
     #[ignore = "requires node/npm; provisions pyright from npm on first run"]
     #[tokio::test]
     async fn daemon_stays_warm_across_two_sequential_connections() {
-        use crate::daemon::protocol::{DaemonEnvelope, DaemonRequest, DaemonResponseEnvelope, read_line, write_line};
+        use crate::daemon::protocol::{
+            DaemonEnvelope, DaemonRequest, DaemonResponseEnvelope, read_line, write_line,
+        };
         use crate::graph::DbActor;
         use crate::indexer::index_language;
         use crate::mcp::dto::{AtRef, FindDefinitionInput};
@@ -330,11 +345,16 @@ mod tests {
         let stream1 = UnixStream::connect(&sock_path).await.unwrap();
         let (read1, mut write1) = stream1.into_split();
         let mut reader1 = BufReader::new(read1);
-        write_line(&mut write1, &find_definition_at_usage(1)).await.unwrap();
+        write_line(&mut write1, &find_definition_at_usage(1))
+            .await
+            .unwrap();
         let response1: DaemonResponseEnvelope = read_line(&mut reader1).await.unwrap().unwrap();
         let value1 = response1.result.expect("connection 1 resolves definition");
         assert_eq!(value1["nodes"][0]["name"], "helper");
-        assert!(value1.get("degraded").is_none(), "connection 1 must not be degraded");
+        assert!(
+            value1.get("degraded").is_none(),
+            "connection 1 must not be degraded"
+        );
         drop(write1);
         drop(reader1);
 
@@ -343,11 +363,16 @@ mod tests {
         let stream2 = UnixStream::connect(&sock_path).await.unwrap();
         let (read2, mut write2) = stream2.into_split();
         let mut reader2 = BufReader::new(read2);
-        write_line(&mut write2, &find_definition_at_usage(2)).await.unwrap();
+        write_line(&mut write2, &find_definition_at_usage(2))
+            .await
+            .unwrap();
         let response2: DaemonResponseEnvelope = read_line(&mut reader2).await.unwrap().unwrap();
         let value2 = response2.result.expect("connection 2 resolves definition");
         assert_eq!(value2["nodes"][0]["name"], "helper");
-        assert!(value2.get("degraded").is_none(), "connection 2 must not be degraded");
+        assert!(
+            value2.get("degraded").is_none(),
+            "connection 2 must not be degraded"
+        );
 
         // Explicit stop, mirroring `daemon stop`.
         write_line(

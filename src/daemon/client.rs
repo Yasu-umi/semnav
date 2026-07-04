@@ -12,12 +12,17 @@ use tokio::io::{AsyncRead, AsyncWrite, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
 
-use super::protocol::{DaemonEnvelope, DaemonRequest, DaemonResponseEnvelope, read_line, write_line};
+use super::protocol::{
+    DaemonEnvelope, DaemonRequest, DaemonResponseEnvelope, read_line, write_line,
+};
 
 type Reply = oneshot::Sender<Result<serde_json::Value, String>>;
 
 enum Cmd {
-    Call { request: DaemonRequest, reply: Reply },
+    Call {
+        request: DaemonRequest,
+        reply: Reply,
+    },
 }
 
 /// Inbound events produced by the reader task.
@@ -190,7 +195,9 @@ mod tests {
 
         let client = DaemonClient::spawn(client_reader, client_writer);
         let value = client
-            .call(DaemonRequest::RestartLsp(RestartLspInput { language: None }))
+            .call(DaemonRequest::RestartLsp(RestartLspInput {
+                language: None,
+            }))
             .await
             .unwrap();
         assert_eq!(value["restarted"], serde_json::json!([]));
@@ -204,9 +211,15 @@ mod tests {
 
         let client = DaemonClient::spawn(client_reader, client_writer);
         let (a, b, c) = tokio::join!(
-            client.call(DaemonRequest::RestartLsp(RestartLspInput { language: None })),
-            client.call(DaemonRequest::RestartLsp(RestartLspInput { language: None })),
-            client.call(DaemonRequest::RestartLsp(RestartLspInput { language: None })),
+            client.call(DaemonRequest::RestartLsp(RestartLspInput {
+                language: None
+            })),
+            client.call(DaemonRequest::RestartLsp(RestartLspInput {
+                language: None
+            })),
+            client.call(DaemonRequest::RestartLsp(RestartLspInput {
+                language: None
+            })),
         );
         assert!(a.is_ok() && b.is_ok() && c.is_ok());
     }
@@ -219,7 +232,9 @@ mod tests {
 
         let client = DaemonClient::spawn(client_reader, client_writer);
         let result = client
-            .call(DaemonRequest::RestartLsp(RestartLspInput { language: None }))
+            .call(DaemonRequest::RestartLsp(RestartLspInput {
+                language: None,
+            }))
             .await;
         assert!(result.is_err());
     }

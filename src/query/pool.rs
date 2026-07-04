@@ -278,20 +278,34 @@ impl QueryRuntime {
             ));
         };
         let Some(client) = client else {
-            let result = self.engine.references_from_cache(anchor_id, filter, page).await?;
+            let result = self
+                .engine
+                .references_from_cache(anchor_id, filter, page)
+                .await?;
             return Ok((result, degradation, false));
         };
-        let wrapper = ClientLspQueryClient::with_default_timeout(&client.client, client.language_id());
+        let wrapper =
+            ClientLspQueryClient::with_default_timeout(&client.client, client.language_id());
         self.engine.ensure_open(&anchor_node.uri, &wrapper).await;
 
-        let warm = self.engine.db().is_materialized(anchor_id, "references").await?;
+        let warm = self
+            .engine
+            .db()
+            .is_materialized(anchor_id, "references")
+            .await?;
         if !warm {
             let materialize_timed_out = self
                 .engine
                 .materialize_references(anchor_id, &anchor_node, &wrapper)
                 .await?;
-            self.engine.db().mark_materialized(anchor_id, "references").await?;
-            let result = self.engine.references_from_cache(anchor_id, filter, page).await?;
+            self.engine
+                .db()
+                .mark_materialized(anchor_id, "references")
+                .await?;
+            let result = self
+                .engine
+                .references_from_cache(anchor_id, filter, page)
+                .await?;
             return Ok((
                 result,
                 degradation.or(timeout_degradation(timed_out || materialize_timed_out)),
@@ -299,7 +313,10 @@ impl QueryRuntime {
             ));
         }
 
-        let result = self.engine.references_from_cache(anchor_id, filter, page).await?;
+        let result = self
+            .engine
+            .references_from_cache(anchor_id, filter, page)
+            .await?;
         let refreshing = self.spawn_refresh(
             anchor_id,
             "references",
@@ -307,7 +324,11 @@ impl QueryRuntime {
             anchor_node,
             client,
         );
-        Ok((result, degradation.or(timeout_degradation(timed_out)), refreshing))
+        Ok((
+            result,
+            degradation.or(timeout_degradation(timed_out)),
+            refreshing,
+        ))
     }
 
     /// `find_callers` — cache-first + background refresh; see
@@ -338,10 +359,14 @@ impl QueryRuntime {
             ));
         };
         let Some(client) = client else {
-            let result = self.engine.callers_from_cache(anchor_id, filter, page).await?;
+            let result = self
+                .engine
+                .callers_from_cache(anchor_id, filter, page)
+                .await?;
             return Ok((result, degradation, false));
         };
-        let wrapper = ClientLspQueryClient::with_default_timeout(&client.client, client.language_id());
+        let wrapper =
+            ClientLspQueryClient::with_default_timeout(&client.client, client.language_id());
         self.engine.ensure_open(&anchor_node.uri, &wrapper).await;
 
         let warm = self.engine.db().is_materialized(anchor_id, "calls").await?;
@@ -350,8 +375,14 @@ impl QueryRuntime {
                 .engine
                 .materialize_call_edges(anchor_id, &anchor_node, Direction::Incoming, &wrapper)
                 .await?;
-            self.engine.db().mark_materialized(anchor_id, "calls").await?;
-            let result = self.engine.callers_from_cache(anchor_id, filter, page).await?;
+            self.engine
+                .db()
+                .mark_materialized(anchor_id, "calls")
+                .await?;
+            let result = self
+                .engine
+                .callers_from_cache(anchor_id, filter, page)
+                .await?;
             return Ok((
                 result,
                 degradation.or(timeout_degradation(timed_out || materialize_timed_out)),
@@ -359,7 +390,10 @@ impl QueryRuntime {
             ));
         }
 
-        let result = self.engine.callers_from_cache(anchor_id, filter, page).await?;
+        let result = self
+            .engine
+            .callers_from_cache(anchor_id, filter, page)
+            .await?;
         let refreshing = self.spawn_refresh(
             anchor_id,
             "calls",
@@ -367,7 +401,11 @@ impl QueryRuntime {
             anchor_node,
             client,
         );
-        Ok((result, degradation.or(timeout_degradation(timed_out)), refreshing))
+        Ok((
+            result,
+            degradation.or(timeout_degradation(timed_out)),
+            refreshing,
+        ))
     }
 
     /// `find_callees` — on-demand outgoing call hierarchy when the anchor's
@@ -709,7 +747,10 @@ mod tests {
             .expect("degrades, not errors");
         assert!(res.references.is_empty());
         assert!(degradation.is_none(), "unresolvable fqn is not degraded");
-        assert!(!refreshing, "no anchor ⇒ nothing to refresh in the background");
+        assert!(
+            !refreshing,
+            "no anchor ⇒ nothing to refresh in the background"
+        );
         // No supervisor was created for an unresolvable language.
         assert!(
             runtime.supervisors.lock().unwrap().is_empty(),
@@ -738,7 +779,10 @@ mod tests {
             .expect("degrades, not errors");
         assert!(res.items.is_empty());
         assert!(degradation.is_none(), "unresolvable fqn is not degraded");
-        assert!(!refreshing, "no anchor ⇒ nothing to refresh in the background");
+        assert!(
+            !refreshing,
+            "no anchor ⇒ nothing to refresh in the background"
+        );
         assert!(
             runtime.supervisors.lock().unwrap().is_empty(),
             "no server spawned for an unknown fqn"
@@ -1091,9 +1135,12 @@ mod tests {
         // gate: `find_callers` has already returned, so the gate must clear
         // near-instantly, not block for as long as the (possibly still
         // in-flight) background LSP round trip takes.
-        tokio::time::timeout(std::time::Duration::from_millis(500), runtime.wait_until_query_idle())
-            .await
-            .expect("a background refresh must not hold the watcher-yield gate");
+        tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            runtime.wait_until_query_idle(),
+        )
+        .await
+        .expect("a background refresh must not hold the watcher-yield gate");
 
         // Give the background refresh time to complete, then requery.
         let mut caught_up = false;

@@ -308,7 +308,9 @@ impl QueryEngine {
                 .materialize_call_edges(anchor_id, &anchor, direction, client)
                 .await?;
         }
-        let result = self.read_calls_page(anchor_id, direction, filter, page).await?;
+        let result = self
+            .read_calls_page(anchor_id, direction, filter, page)
+            .await?;
         Ok((result, timed_out))
     }
 
@@ -1009,8 +1011,12 @@ mod tests {
     /// 4), a matching engine, and a mock wired for one `prepareCallHierarchy`
     /// / `outgoingCalls` round trip. The backing tempdir is leaked so the file
     /// outlives the test.
-    async fn callees_cache_scenario()
-    -> (QueryEngine, MockLspQueryClient, SymbolRef, std::path::PathBuf) {
+    async fn callees_cache_scenario() -> (
+        QueryEngine,
+        MockLspQueryClient,
+        SymbolRef,
+        std::path::PathBuf,
+    ) {
         let dir = tempdir().unwrap();
         let path = dir.path().join("mod.py");
         fs::write(
@@ -1062,12 +1068,7 @@ mod tests {
             }],
         );
 
-        (
-            engine,
-            mock,
-            SymbolRef::Fqn("repo.caller".into()),
-            path,
-        )
+        (engine, mock, SymbolRef::Fqn("repo.caller".into()), path)
     }
 
     #[tokio::test]

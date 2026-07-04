@@ -69,7 +69,10 @@ mod tests {
         drop(first);
 
         let second = DaemonLock::try_acquire(&path).unwrap();
-        assert!(second.is_some(), "lock must be acquirable again after release");
+        assert!(
+            second.is_some(),
+            "lock must be acquirable again after release"
+        );
     }
 
     #[test]
