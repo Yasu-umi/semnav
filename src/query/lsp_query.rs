@@ -14,7 +14,7 @@
 //!   is flattened to a single text blob.
 
 #[cfg(test)]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::time::Duration;
 
@@ -336,15 +336,39 @@ fn pos_params(uri: &str, line: u32, character: u32) -> Value {
     })
 }
 
-/// Run an LSP request with a deadline, mapping a timeout to an error string the
-/// supervisor classifies as [`FailureKind::Timeout`] (see `lsp/supervisor.rs`).
-async fn timed<F>(deadline: Duration, fut: F, op: &str) -> Result<Value>
+/// Run an LSP request with a deadline, mapping a timeout to a typed
+/// [`QueryTimedOut`] (detectable via [`is_timeout`], independent of the
+/// supervisor's own [`FailureKind::Timeout`] classification in `lsp/supervisor.rs`).
+async fn timed<F>(deadline: Duration, fut: F, op: &'static str) -> Result<Value>
 where
     F: std::future::Future<Output = Result<Value>>,
 {
     timeout(deadline, fut)
         .await
-        .map_err(|_| anyhow!("{op} timed out after {deadline:?}"))?
+        .map_err(move |_| anyhow::Error::from(QueryTimedOut { op, deadline }))?
+}
+
+/// Marker error for a query-time LSP round-trip that hit [`timed`]'s deadline —
+/// distinguishes a timeout from any other LSP/transport failure so callers can
+/// surface a degrade signal instead of silently dropping the result.
+#[derive(Debug)]
+pub struct QueryTimedOut {
+    op: &'static str,
+    deadline: Duration,
+}
+
+impl std::fmt::Display for QueryTimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} timed out after {:?}", self.op, self.deadline)
+    }
+}
+
+impl std::error::Error for QueryTimedOut {}
+
+/// True if `err` was produced by [`timed`] hitting its deadline, rather than
+/// any other LSP/transport failure.
+pub fn is_timeout(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<QueryTimedOut>().is_some()
 }
 
 #[derive(Deserialize)]
@@ -479,7 +503,11 @@ type ItemKey = (String, u32, u32);
 
 /// In-memory client for operation unit tests. Each method looks up its canned
 /// response by position (or by item key for call hierarchy) and returns an
-/// empty/`None` result when none is programmed.
+/// empty/`None` result when none is programmed. `timeout_ops` overrides that:
+/// listed op names (`"definition"`, `"references"`, `"prepareCallHierarchy"`,
+/// `"incomingCalls"`, `"outgoingCalls"`, `"hover"`) fail with a
+/// [`QueryTimedOut`] instead, so callers exercising the timeout→degrade path
+/// don't need a real slow server.
 #[cfg(test)]
 #[derive(Default)]
 pub struct MockLspQueryClient {
@@ -489,12 +517,20 @@ pub struct MockLspQueryClient {
     pub incoming: HashMap<ItemKey, Vec<IncomingCall>>,
     pub outgoing: HashMap<ItemKey, Vec<OutgoingCall>>,
     pub hovers: HashMap<PosKey, Option<Hover>>,
+    pub timeout_ops: HashSet<&'static str>,
 }
 
 #[cfg(test)]
 impl MockLspQueryClient {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn timeout_err(op: &'static str) -> anyhow::Error {
+        anyhow::Error::from(QueryTimedOut {
+            op,
+            deadline: Duration::from_secs(0),
+        })
     }
 }
 
@@ -513,12 +549,18 @@ impl LspQueryClient for MockLspQueryClient {
         line: u32,
         character: u32,
     ) -> impl Future<Output = Result<Vec<Location>>> + Send {
+        let timed_out = self.timeout_ops.contains("definition");
         let out = self
             .definitions
             .get(&(uri.to_string(), line, character))
             .cloned()
             .unwrap_or_default();
-        async move { Ok(out) }
+        async move {
+            if timed_out {
+                return Err(Self::timeout_err("definition"));
+            }
+            Ok(out)
+        }
     }
 
     fn references(
@@ -528,12 +570,18 @@ impl LspQueryClient for MockLspQueryClient {
         character: u32,
         _include_declaration: bool,
     ) -> impl Future<Output = Result<Vec<Location>>> + Send {
+        let timed_out = self.timeout_ops.contains("references");
         let out = self
             .references
             .get(&(uri.to_string(), line, character))
             .cloned()
             .unwrap_or_default();
-        async move { Ok(out) }
+        async move {
+            if timed_out {
+                return Err(Self::timeout_err("references"));
+            }
+            Ok(out)
+        }
     }
 
     fn prepare_call_hierarchy(
@@ -542,28 +590,46 @@ impl LspQueryClient for MockLspQueryClient {
         line: u32,
         character: u32,
     ) -> impl Future<Output = Result<Vec<CallHierarchyItem>>> + Send {
+        let timed_out = self.timeout_ops.contains("prepareCallHierarchy");
         let out = self
             .prepare
             .get(&(uri.to_string(), line, character))
             .cloned()
             .unwrap_or_default();
-        async move { Ok(out) }
+        async move {
+            if timed_out {
+                return Err(Self::timeout_err("prepareCallHierarchy"));
+            }
+            Ok(out)
+        }
     }
 
     fn incoming_calls(
         &self,
         item: &CallHierarchyItem,
     ) -> impl Future<Output = Result<Vec<IncomingCall>>> + Send {
+        let timed_out = self.timeout_ops.contains("incomingCalls");
         let out = self.incoming.get(&item.key()).cloned().unwrap_or_default();
-        async move { Ok(out) }
+        async move {
+            if timed_out {
+                return Err(Self::timeout_err("incomingCalls"));
+            }
+            Ok(out)
+        }
     }
 
     fn outgoing_calls(
         &self,
         item: &CallHierarchyItem,
     ) -> impl Future<Output = Result<Vec<OutgoingCall>>> + Send {
+        let timed_out = self.timeout_ops.contains("outgoingCalls");
         let out = self.outgoing.get(&item.key()).cloned().unwrap_or_default();
-        async move { Ok(out) }
+        async move {
+            if timed_out {
+                return Err(Self::timeout_err("outgoingCalls"));
+            }
+            Ok(out)
+        }
     }
 
     fn hover(
@@ -692,6 +758,25 @@ mod tests {
             raw: Value::Null,
         };
         assert_eq!(item.key(), ("file:///a.py".to_string(), 0, 4));
+    }
+
+    #[tokio::test]
+    async fn timed_reports_query_timed_out_on_deadline() {
+        let err = timed(
+            Duration::from_millis(10),
+            std::future::pending::<Result<Value>>(),
+            "definition",
+        )
+        .await
+        .unwrap_err();
+        assert!(is_timeout(&err));
+        assert!(format!("{err}").contains("definition timed out after"));
+    }
+
+    #[test]
+    fn is_timeout_false_for_other_errors() {
+        let err = anyhow!("some other failure");
+        assert!(!is_timeout(&err));
     }
 
     #[tokio::test]

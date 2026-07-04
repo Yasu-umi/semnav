@@ -37,21 +37,24 @@ use super::{
     MatchMode, Page, QueryEngine, ReadRangeResult, SymbolRef,
 };
 
-/// Why an LSP-dependent operation fell back to cache-only data
-/// (`docs/design/resilience.md`). 0.0.1 only observes acquire-time failures —
-/// a request-level failure on an already-acquired client (timeout/transport)
-/// is swallowed by `resolver.rs`/`ops.rs`'s `.unwrap_or_default()` and is not
-/// yet surfaced, so `lsp_timeout`/`lsp_partial` are reserved, unproducible
-/// wire values until that deeper refactor lands.
+/// Why an LSP-dependent operation fell back to cache-only (or partially
+/// cache-only) data (`docs/design/resilience.md`). `LspUnavailable` covers
+/// acquire-time failures (server `down`/`restarting`); `LspTimeout` covers a
+/// request-level round-trip that exceeded `QUERY_TIMEOUT` on an
+/// already-acquired client (`resolver.rs`/`ops.rs` surface this via each
+/// operation's returned timeout flag). `lsp_partial` (spec-unsupported
+/// methods) remains a reserved, unproduced wire value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DegradeReason {
     LspUnavailable,
+    LspTimeout,
 }
 
 impl DegradeReason {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::LspUnavailable => "lsp_unavailable",
+            Self::LspTimeout => "lsp_timeout",
         }
     }
 }
@@ -175,11 +178,11 @@ impl QueryRuntime {
         let wrapper = client.as_ref().map(|c| {
             ClientLspQueryClient::with_default_timeout(c, language.as_deref().unwrap_or(""))
         });
-        let result = self
+        let (result, timed_out) = self
             .engine
             .find_definition(symref, wrapper.as_ref())
             .await?;
-        Ok((result, degradation))
+        Ok((result, degradation.or(timeout_degradation(timed_out))))
     }
 
     /// `find_references` — on-demand `textDocument/references` materialization
@@ -194,11 +197,11 @@ impl QueryRuntime {
         let wrapper = client
             .as_ref()
             .map(|c| ClientLspQueryClient::with_default_timeout(&c.client, c.language_id()));
-        let result = self
+        let (result, timed_out) = self
             .engine
             .find_references(symref, filter, page, wrapper.as_ref())
             .await?;
-        Ok((result, degradation))
+        Ok((result, degradation.or(timeout_degradation(timed_out))))
     }
 
     /// `find_callers` — on-demand incoming call hierarchy when the anchor's
@@ -213,11 +216,11 @@ impl QueryRuntime {
         let wrapper = client
             .as_ref()
             .map(|c| ClientLspQueryClient::with_default_timeout(&c.client, c.language_id()));
-        let result = self
+        let (result, timed_out) = self
             .engine
             .find_callers(symref, filter, page, wrapper.as_ref())
             .await?;
-        Ok((result, degradation))
+        Ok((result, degradation.or(timeout_degradation(timed_out))))
     }
 
     /// `find_callees` — on-demand outgoing call hierarchy when the anchor's
@@ -232,11 +235,11 @@ impl QueryRuntime {
         let wrapper = client
             .as_ref()
             .map(|c| ClientLspQueryClient::with_default_timeout(&c.client, c.language_id()));
-        let result = self
+        let (result, timed_out) = self
             .engine
             .find_callees(symref, filter, page, wrapper.as_ref())
             .await?;
-        Ok((result, degradation))
+        Ok((result, degradation.or(timeout_degradation(timed_out))))
     }
 
     /// Explicitly shut down every provisioned server (the graceful
@@ -339,6 +342,18 @@ impl QueryRuntime {
     }
 }
 
+/// `Some(Degradation)` when `timed_out` — the acquired client was healthy, but
+/// a request-level LSP round-trip on it hit `QUERY_TIMEOUT`. Callers only
+/// apply this when acquire itself didn't already degrade (an acquire failure
+/// takes precedence over a same-request timeout that never got the chance to
+/// happen).
+fn timeout_degradation(timed_out: bool) -> Option<Degradation> {
+    timed_out.then_some(Degradation {
+        reason: DegradeReason::LspTimeout,
+        status: LspStatus::Degraded,
+    })
+}
+
 /// A live client paired with the language it serves, so the caller can build a
 /// correctly-tagged [`ClientLspQueryClient`] (`language_id` for `didOpen`).
 struct AcquiredClient {
@@ -407,6 +422,21 @@ mod tests {
             Degradation::from(AcquireError::StartFailed("boom".into())).status,
             LspStatus::Degraded
         );
+    }
+
+    /// A timed-out request-level round-trip on an already-acquired client
+    /// degrades as `LspTimeout`/`Degraded` — distinct from an acquire-time
+    /// `LspUnavailable`, since the server itself is healthy.
+    #[test]
+    fn timeout_degradation_true_yields_lsp_timeout_degraded() {
+        let d = timeout_degradation(true).expect("timed out ⇒ degraded");
+        assert_eq!(d.reason, DegradeReason::LspTimeout);
+        assert_eq!(d.status, LspStatus::Degraded);
+    }
+
+    #[test]
+    fn timeout_degradation_false_is_none() {
+        assert!(timeout_degradation(false).is_none());
     }
 
     /// A cache-only query against an empty graph degrades cleanly: no language

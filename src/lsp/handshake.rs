@@ -20,7 +20,13 @@ pub const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(60);
 /// Maximum wait for a `textDocument/documentSymbol` response.
 pub const DOCUMENT_SYMBOL_TIMEOUT: Duration = Duration::from_secs(30);
 /// Maximum wait for a query-time LSP round-trip (hover, definition, ...).
-pub const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
+///
+/// On large repos, pyright's cross-file requests (`references`,
+/// `callHierarchy`) queue behind a single serialized background-analysis pass
+/// and can take well over a minute — real-world traces have shown ~135s. This
+/// is wide enough to cover that, so a slow-but-live query succeeds instead of
+/// timing out and prompting a client retry that only adds to the backlog.
+pub const QUERY_TIMEOUT: Duration = Duration::from_secs(150);
 
 /// Build the `initialize` request params.
 ///
@@ -107,7 +113,7 @@ mod tests {
     fn timeouts_match_design_doc() {
         assert_eq!(INITIALIZE_TIMEOUT, Duration::from_secs(60));
         assert_eq!(DOCUMENT_SYMBOL_TIMEOUT, Duration::from_secs(30));
-        assert_eq!(QUERY_TIMEOUT, Duration::from_secs(10));
+        assert_eq!(QUERY_TIMEOUT, Duration::from_secs(150));
     }
 
     /// A duplex-backed server that reads nothing and never replies: holding the

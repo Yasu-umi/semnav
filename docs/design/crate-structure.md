@@ -68,7 +68,7 @@ What `async-lsp` can provide is limited to JSON-RPC framing, request/response pa
 
 Implementation notes:
 * Content-Length header + body framing, response pairing via an `id` → pending map, notification reception, `$/cancelRequest` (0.0.1 abandons via timeout and discards responses for unrecognized ids)
-* Timeouts use the values from [lsp-lifecycle.md](./lsp-lifecycle.md) (initialize=60s / documentSymbol=30s / query=10s)
+* Timeouts use the values from [lsp-lifecycle.md](./lsp-lifecycle.md) (initialize=60s / documentSymbol=30s / query=150s)
 
 ### Decision Point 3: `refinery` (`embed_migrations!`) — adopted
 

@@ -74,4 +74,4 @@ In 0.0.1, a tool like `graph status` is out of scope (only the 6 Query API tools
 
 ## Timeouts (finalized, implemented)
 
-Timeouts that trigger degradation. The finalized values, based on observed response distributions from real servers (pyright / tsserver), are in the table in [lsp-lifecycle.md](./lsp-lifecycle.md) (`initialize`=60s / `documentSymbol`=30s / query-type=10s).
+Timeouts that trigger degradation. The finalized values, based on observed response distributions from real servers (pyright / tsserver), are in the table in [lsp-lifecycle.md](./lsp-lifecycle.md) (`initialize`=60s / `documentSymbol`=30s / query-type=150s). A query-type timeout now surfaces as `degrade_reason: "lsp_timeout"` (`lsp_status: "degraded"`) rather than being silently swallowed.

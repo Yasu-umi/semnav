@@ -24,9 +24,9 @@ Three kinds are monitored:
 |---|---|---|
 | `initialize` (startup + provision) | 60s | Longer to accommodate first-time provisioning (isolated install) |
 | `documentSymbol` (1 file) | 30s | Includes initial indexing and dependency resolution |
-| Query operations (definition/refs/callHierarchy/hover) | 10s | Prioritizes user-perceived responsiveness |
+| Query operations (definition/refs/callHierarchy/hover) | 150s | Prioritizes correctness over raw responsiveness: on large repos, pyright's cross-file requests queue behind a single serialized background-analysis pass and real-world traces have shown ~135s round-trips. A short timeout turned a slow-but-live query into a silent, empty result (see `degrade_reason: "lsp_timeout"` in [resilience.md](./resilience.md)) |
 
-> The initial whole-workspace index is treated as progress (per-file timeouts are as above). These values were finalized based on the observed response distribution of real servers (pyright / tsserver).
+> The initial whole-workspace index is treated as progress (per-file timeouts are as above). `initialize`/`documentSymbol` were finalized based on the observed response distribution of real servers (pyright / tsserver); the query-operation timeout was revised upward after observing pyright's serialized background-analysis pass dominate latency on a ~17k-file repo.
 
 ## Health State Machine
 

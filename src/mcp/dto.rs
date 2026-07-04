@@ -216,6 +216,7 @@ impl From<Degradation> for DegradeInfo {
 fn degrade_reason_str(reason: DegradeReason) -> &'static str {
     match reason {
         DegradeReason::LspUnavailable => "lsp_unavailable",
+        DegradeReason::LspTimeout => "lsp_timeout",
     }
 }
 
@@ -440,6 +441,21 @@ mod tests {
         assert_eq!(v.get("degraded").unwrap(), &serde_json::json!(true));
         assert_eq!(v.get("degrade_reason").unwrap(), "lsp_unavailable");
         assert_eq!(v.get("lsp_status").unwrap(), "down");
+    }
+
+    #[test]
+    fn degrade_info_serializes_lsp_timeout_reason() {
+        let d = Degradation {
+            reason: DegradeReason::LspTimeout,
+            status: LspStatus::Degraded,
+        };
+        let output = FindDefinitionOutput {
+            result: FindDefinitionResult { nodes: vec![] },
+            degrade: Some(d.into()),
+        };
+        let v = serde_json::to_value(&output).unwrap();
+        assert_eq!(v.get("degrade_reason").unwrap(), "lsp_timeout");
+        assert_eq!(v.get("lsp_status").unwrap(), "degraded");
     }
 
     #[test]

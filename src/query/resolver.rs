@@ -23,7 +23,7 @@ use crate::graph::{Direction, Edge, Neighbor, Node, Range, Site};
 use crate::indexer::LspRange;
 
 use super::QueryEngine;
-use super::lsp_query::LspQueryClient;
+use super::lsp_query::{LspQueryClient, is_timeout};
 
 impl QueryEngine {
     /// Best-effort `didOpen` so a fresh query-time server has `uri` open before a
@@ -40,18 +40,19 @@ impl QueryEngine {
     /// Resolve a `SymbolRef::At` to the anchor declaration node. With a client we
     /// go definition-first (so a cursor on a *usage* still pins the declaration);
     /// falling back to the indexed node at the position if the server yields no
-    /// resolvable target.
+    /// resolvable target. The returned `bool` is `true` when the `definition`
+    /// call itself timed out (as opposed to genuinely returning nothing).
     pub(super) async fn definition_anchor<C: LspQueryClient>(
         &self,
         uri: &str,
         line: u32,
         character: u32,
         client: &C,
-    ) -> Result<Option<Node>> {
-        let locs = client
-            .definition(uri, line, character)
-            .await
-            .unwrap_or_default();
+    ) -> Result<(Option<Node>, bool)> {
+        let (locs, timed_out) = match client.definition(uri, line, character).await {
+            Ok(locs) => (locs, false),
+            Err(e) => (Vec::new(), is_timeout(&e)),
+        };
         for loc in locs {
             if let Some(node) = self
                 .db
@@ -62,23 +63,26 @@ impl QueryEngine {
                 )
                 .await?
             {
-                return Ok(Some(node));
+                return Ok((Some(node), timed_out));
             }
         }
-        self.db
+        let node = self
+            .db
             .find_node_by_position(uri, line as i64, character as i64)
-            .await
+            .await?;
+        Ok((node, timed_out))
     }
 
     /// Materialize `references` edges into the anchor (incoming). Each LSP
-    /// reference site is attached to its indexed container node.
+    /// reference site is attached to its indexed container node. Returns `true`
+    /// if the `references` call itself timed out.
     pub(super) async fn materialize_references<C: LspQueryClient>(
         &self,
         anchor_id: i64,
         anchor: &Node,
         client: &C,
-    ) -> Result<()> {
-        let locs = client
+    ) -> Result<bool> {
+        let (locs, timed_out) = match client
             .references(
                 &anchor.uri,
                 anchor.sel.start_line as u32,
@@ -86,7 +90,10 @@ impl QueryEngine {
                 true,
             )
             .await
-            .unwrap_or_default();
+        {
+            Ok(locs) => (locs, false),
+            Err(e) => (Vec::new(), is_timeout(&e)),
+        };
         for loc in locs {
             let Some(container) = self
                 .db
@@ -116,33 +123,43 @@ impl QueryEngine {
                 ))
                 .await?;
         }
-        Ok(())
+        Ok(timed_out)
     }
 
     /// Materialize `calls` edges for the anchor in `direction` via call hierarchy.
     /// `from_ranges` are the call-site spans; their `uri` is the caller's document
-    /// (`from.uri` for incoming, the anchor for outgoing).
+    /// (`from.uri` for incoming, the anchor for outgoing). Returns `true` if
+    /// `prepareCallHierarchy` or the direction's call-edges request timed out.
     pub(super) async fn materialize_call_edges<C: LspQueryClient>(
         &self,
         anchor_id: i64,
         anchor: &Node,
         direction: Direction,
         client: &C,
-    ) -> Result<()> {
-        let items = client
+    ) -> Result<bool> {
+        let (items, mut timed_out) = match client
             .prepare_call_hierarchy(
                 &anchor.uri,
                 anchor.sel.start_line as u32,
                 anchor.sel.start_col as u32,
             )
             .await
-            .unwrap_or_default();
+        {
+            Ok(items) => (items, false),
+            Err(e) => (Vec::new(), is_timeout(&e)),
+        };
         let Some(item) = items.into_iter().next() else {
-            return Ok(());
+            return Ok(timed_out);
         };
         match direction {
             Direction::Incoming => {
-                let calls = client.incoming_calls(&item).await.unwrap_or_default();
+                let calls = match client.incoming_calls(&item).await {
+                    Ok(calls) => calls,
+                    Err(e) => {
+                        timed_out |= is_timeout(&e);
+                        Vec::new()
+                    }
+                };
                 for call in calls {
                     let Some(caller) = self
                         .db
@@ -171,7 +188,13 @@ impl QueryEngine {
                 }
             }
             Direction::Outgoing => {
-                let calls = client.outgoing_calls(&item).await.unwrap_or_default();
+                let calls = match client.outgoing_calls(&item).await {
+                    Ok(calls) => calls,
+                    Err(e) => {
+                        timed_out |= is_timeout(&e);
+                        Vec::new()
+                    }
+                };
                 for call in calls {
                     let Some(callee) = self
                         .db
@@ -200,7 +223,7 @@ impl QueryEngine {
                 }
             }
         }
-        Ok(())
+        Ok(timed_out)
     }
 }
 
@@ -281,6 +304,8 @@ pub(super) fn group_by_node(mut neighbors: Vec<Neighbor>) -> Vec<(Node, Vec<Site
 mod tests {
     use super::*;
     use crate::graph::Range;
+    use crate::query::lsp_query::MockLspQueryClient;
+    use tempfile::tempdir;
 
     fn node(fqn: &str, line: i64) -> Node {
         Node {
@@ -326,6 +351,71 @@ mod tests {
                 end_col: 2,
             },
         }
+    }
+
+    /// A helper for a QueryEngine backed by an isolated on-disk graph db, for
+    /// tests that need to exercise the LSP-materialization paths rather than
+    /// just `group_by_node`'s pure sort.
+    fn engine() -> QueryEngine {
+        let dir = tempdir().unwrap();
+        let db = crate::graph::DbActor::spawn(&dir.path().join("g.db")).unwrap();
+        std::mem::forget(dir);
+        QueryEngine::new(db, "file:///repo".to_string())
+    }
+
+    #[tokio::test]
+    async fn definition_anchor_falls_back_to_position_and_reports_timeout() {
+        let engine = engine();
+        engine.db().upsert_node(node("repo.helper", 0)).await.unwrap();
+
+        let mut mock = MockLspQueryClient::new();
+        mock.timeout_ops.insert("definition");
+
+        let (anchor, timed_out) = engine
+            .definition_anchor("file:///m.py", 0, 0, &mock)
+            .await
+            .unwrap();
+        assert!(timed_out, "definition timeout must be reported");
+        // Falls back to the indexed node at the cursor position itself.
+        assert_eq!(anchor.unwrap().fqn, "repo.helper");
+    }
+
+    #[tokio::test]
+    async fn materialize_references_reports_timeout_without_edges() {
+        let engine = engine();
+        let helper = node("repo.helper", 0);
+        let anchor_id = engine.db().upsert_node(helper.clone()).await.unwrap();
+
+        let mut mock = MockLspQueryClient::new();
+        mock.timeout_ops.insert("references");
+
+        let timed_out = engine
+            .materialize_references(anchor_id, &helper, &mock)
+            .await
+            .unwrap();
+        assert!(timed_out, "references timeout must be reported");
+        let neighbors = engine
+            .db()
+            .get_neighbors(anchor_id, "references", Direction::Incoming)
+            .await
+            .unwrap();
+        assert!(neighbors.is_empty(), "no edge materialized on timeout");
+    }
+
+    #[tokio::test]
+    async fn materialize_call_edges_reports_timeout_when_prepare_times_out() {
+        let engine = engine();
+        let helper = node("repo.helper", 0);
+        let anchor_id = engine.db().upsert_node(helper.clone()).await.unwrap();
+
+        let mut mock = MockLspQueryClient::new();
+        mock.timeout_ops.insert("prepareCallHierarchy");
+
+        let timed_out = engine
+            .materialize_call_edges(anchor_id, &helper, Direction::Incoming, &mock)
+            .await
+            .unwrap();
+        assert!(timed_out, "prepareCallHierarchy timeout must be reported");
     }
 
     #[test]

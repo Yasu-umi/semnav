@@ -14,7 +14,7 @@ use super::dto::{
     NodeDto, Position, RangeDto, ReadRangeResult, ReferenceGroup,
 };
 use super::filter::{Filter, MatchMode, Page, SortKey, SymbolRef};
-use super::lsp_query::LspQueryClient;
+use super::lsp_query::{LspQueryClient, is_timeout};
 use super::resolver::group_by_node;
 use super::{QueryEngine, paginate};
 
@@ -77,16 +77,19 @@ impl QueryEngine {
     /// Resolve a declaration. `Fqn` ⇒ the node itself; `At` ⇒ on-demand
     /// `textDocument/definition`, each target resolved to an indexed node
     /// (external targets dropped). Cache-only `At` (no client) returns empty.
+    /// The returned `bool` is `true` when the `definition` call itself timed
+    /// out (the `hover` call used for construct-refinement is not flagged: its
+    /// silent failure doesn't corrupt the returned definition).
     pub async fn find_definition<C: LspQueryClient>(
         &self,
         symref: &SymbolRef,
         client: Option<&C>,
-    ) -> Result<FindDefinitionResult> {
+    ) -> Result<(FindDefinitionResult, bool)> {
         match symref {
             SymbolRef::Fqn(fqn) => {
                 let node = self.db.get_node_by_fqn(fqn).await?;
                 let nodes = node.into_iter().map(|n| NodeDto::from_node(&n)).collect();
-                Ok(FindDefinitionResult { nodes })
+                Ok((FindDefinitionResult { nodes }, false))
             }
             SymbolRef::At {
                 uri,
@@ -94,13 +97,13 @@ impl QueryEngine {
                 character,
             } => {
                 let Some(client) = client else {
-                    return Ok(FindDefinitionResult { nodes: Vec::new() });
+                    return Ok((FindDefinitionResult { nodes: Vec::new() }, false));
                 };
                 self.ensure_open(uri, client).await;
-                let locs = client
-                    .definition(uri, *line, *character)
-                    .await
-                    .unwrap_or_default();
+                let (locs, timed_out) = match client.definition(uri, *line, *character).await {
+                    Ok(locs) => (locs, false),
+                    Err(e) => (Vec::new(), is_timeout(&e)),
+                };
                 let mut nodes = Vec::new();
                 for loc in locs {
                     if let Some(mut node) = self
@@ -129,32 +132,34 @@ impl QueryEngine {
                         nodes.push(NodeDto::from_node(&node));
                     }
                 }
-                Ok(FindDefinitionResult { nodes })
+                Ok((FindDefinitionResult { nodes }, timed_out))
             }
         }
     }
 
     /// Find nodes referencing `symref`, grouped by referencing node with each
     /// occurrence range. On-demand `textDocument/references` materializes edges
-    /// when a client is supplied.
+    /// when a client is supplied. The returned `bool` is `true` if any
+    /// underlying LSP call (anchor resolution or `references`) timed out.
     pub async fn find_references<C: LspQueryClient>(
         &self,
         symref: &SymbolRef,
         filter: &Filter,
         page: &Page,
         client: Option<&C>,
-    ) -> Result<FindReferencesResult> {
+    ) -> Result<(FindReferencesResult, bool)> {
         let empty = || FindReferencesResult {
             references: Vec::new(),
             next_cursor: None,
         };
-        let anchor_id = self.resolve_anchor_id(symref, client).await?;
+        let (anchor_id, mut timed_out) = self.resolve_anchor_id(symref, client).await?;
         let Some((anchor_id, anchor)) = anchor_id else {
-            return Ok(empty());
+            return Ok((empty(), timed_out));
         };
         if let Some(client) = client {
             self.ensure_open(&anchor.uri, client).await;
-            self.materialize_references(anchor_id, &anchor, client)
+            timed_out |= self
+                .materialize_references(anchor_id, &anchor, client)
                 .await?;
         }
         let neighbors = self
@@ -174,10 +179,13 @@ impl QueryEngine {
                 sites: sites.into_iter().map(|s| RangeDto::from(s.range)).collect(),
             })
             .collect();
-        Ok(FindReferencesResult {
-            references,
-            next_cursor: next.map(|c| c.encode()),
-        })
+        Ok((
+            FindReferencesResult {
+                references,
+                next_cursor: next.map(|c| c.encode()),
+            },
+            timed_out,
+        ))
     }
 
     /// Find `symref`'s callers (incoming `calls`). On-demand call hierarchy when
@@ -188,7 +196,7 @@ impl QueryEngine {
         filter: &Filter,
         page: &Page,
         client: Option<&C>,
-    ) -> Result<CallGraphResult> {
+    ) -> Result<(CallGraphResult, bool)> {
         self.call_graph(symref, Direction::Incoming, filter, page, client)
             .await
     }
@@ -201,13 +209,15 @@ impl QueryEngine {
         filter: &Filter,
         page: &Page,
         client: Option<&C>,
-    ) -> Result<CallGraphResult> {
+    ) -> Result<(CallGraphResult, bool)> {
         self.call_graph(symref, Direction::Outgoing, filter, page, client)
             .await
     }
 
     /// Shared callers/callees body: resolve the anchor, optionally materialize
-    /// `calls` edges, read them back grouped by adjacent callable.
+    /// `calls` edges, read them back grouped by adjacent callable. The returned
+    /// `bool` is `true` if any underlying LSP call (anchor resolution or call
+    /// hierarchy) timed out.
     async fn call_graph<C: LspQueryClient>(
         &self,
         symref: &SymbolRef,
@@ -215,18 +225,19 @@ impl QueryEngine {
         filter: &Filter,
         page: &Page,
         client: Option<&C>,
-    ) -> Result<CallGraphResult> {
+    ) -> Result<(CallGraphResult, bool)> {
         let empty = || CallGraphResult {
             items: Vec::new(),
             next_cursor: None,
         };
-        let anchor_id = self.resolve_anchor_id(symref, client).await?;
+        let (anchor_id, mut timed_out) = self.resolve_anchor_id(symref, client).await?;
         let Some((anchor_id, anchor)) = anchor_id else {
-            return Ok(empty());
+            return Ok((empty(), timed_out));
         };
         if let Some(client) = client {
             self.ensure_open(&anchor.uri, client).await;
-            self.materialize_call_edges(anchor_id, &anchor, direction, client)
+            timed_out |= self
+                .materialize_call_edges(anchor_id, &anchor, direction, client)
                 .await?;
         }
         let neighbors = self.db.get_neighbors(anchor_id, "calls", direction).await?;
@@ -243,22 +254,26 @@ impl QueryEngine {
                 call_sites: sites.into_iter().map(|s| RangeDto::from(s.range)).collect(),
             })
             .collect();
-        Ok(CallGraphResult {
-            items,
-            next_cursor: next.map(|c| c.encode()),
-        })
+        Ok((
+            CallGraphResult {
+                items,
+                next_cursor: next.map(|c| c.encode()),
+            },
+            timed_out,
+        ))
     }
 
     /// Resolve `symref` to `(id, node)`. `Fqn` ⇒ direct lookup; `At` ⇒
     /// definition-first when a client is present, else the indexed node at the
-    /// position. Returns `None` when no anchor is resolvable.
+    /// position. `None` when no anchor is resolvable; the `bool` is `true` when
+    /// the `definition` call itself timed out.
     async fn resolve_anchor_id<C: LspQueryClient>(
         &self,
         symref: &SymbolRef,
         client: Option<&C>,
-    ) -> Result<Option<(i64, crate::graph::Node)>> {
-        let anchor = match symref {
-            SymbolRef::Fqn(fqn) => self.db.get_node_by_fqn(fqn).await?,
+    ) -> Result<(Option<(i64, crate::graph::Node)>, bool)> {
+        let (anchor, timed_out) = match symref {
+            SymbolRef::Fqn(fqn) => (self.db.get_node_by_fqn(fqn).await?, false),
             SymbolRef::At {
                 uri,
                 line,
@@ -268,14 +283,18 @@ impl QueryEngine {
                     self.definition_anchor(uri, *line, *character, client)
                         .await?
                 }
-                None => {
+                None => (
                     self.db
                         .find_node_by_position(uri, *line as i64, *character as i64)
-                        .await?
-                }
+                        .await?,
+                    false,
+                ),
             },
         };
-        Ok(anchor.and_then(|node| node.id.map(|id| (id, node))))
+        Ok((
+            anchor.and_then(|node| node.id.map(|id| (id, node))),
+            timed_out,
+        ))
     }
 }
 
@@ -492,7 +511,7 @@ mod tests {
     #[tokio::test]
     async fn find_definition_fqn_returns_node() {
         let (engine, _mock) = scenario().await;
-        let res = engine
+        let (res, timed_out) = engine
             .find_definition(
                 &SymbolRef::Fqn("repo.helper".into()),
                 None::<&MockLspQueryClient>,
@@ -501,13 +520,14 @@ mod tests {
             .unwrap();
         assert_eq!(res.nodes.len(), 1);
         assert_eq!(res.nodes[0].fqn, "repo.helper");
+        assert!(!timed_out);
     }
 
     #[tokio::test]
     async fn find_definition_at_uses_lsp_then_resolves_target() {
         let (engine, mock) = scenario().await;
         // Cursor on the usage inside caller at (7,4).
-        let res = engine
+        let (res, timed_out) = engine
             .find_definition(
                 &SymbolRef::At {
                     uri: URI.into(),
@@ -520,6 +540,7 @@ mod tests {
             .unwrap();
         assert_eq!(res.nodes.len(), 1);
         assert_eq!(res.nodes[0].fqn, "repo.helper");
+        assert!(!timed_out);
     }
 
     #[tokio::test]
@@ -546,7 +567,7 @@ mod tests {
             }),
         );
 
-        let res = engine
+        let (res, timed_out) = engine
             .find_definition(
                 &SymbolRef::At {
                     uri: URI.into(),
@@ -560,12 +581,13 @@ mod tests {
         assert_eq!(res.nodes.len(), 1);
         assert_eq!(res.nodes[0].fqn, "repo.alias");
         assert_eq!(res.nodes[0].kind_label, "TypeAlias");
+        assert!(!timed_out);
     }
 
     #[tokio::test]
     async fn find_definition_at_without_client_is_empty() {
         let (engine, _mock) = scenario().await;
-        let res = engine
+        let (res, timed_out) = engine
             .find_definition(
                 &SymbolRef::At {
                     uri: URI.into(),
@@ -577,12 +599,13 @@ mod tests {
             .await
             .unwrap();
         assert!(res.nodes.is_empty());
+        assert!(!timed_out);
     }
 
     #[tokio::test]
     async fn find_references_materializes_and_groups() {
         let (engine, mock) = scenario().await;
-        let res = engine
+        let (res, timed_out) = engine
             .find_references(
                 &SymbolRef::Fqn("repo.helper".into()),
                 &Filter::default(),
@@ -596,9 +619,10 @@ mod tests {
         assert_eq!(group.node.fqn, "repo.caller");
         assert_eq!(group.sites.len(), 1);
         assert_eq!(group.sites[0].start.line, 7);
+        assert!(!timed_out);
 
         // Re-run cache-only: the materialized edge is served without the client.
-        let cached = engine
+        let (cached, cached_timed_out) = engine
             .find_references(
                 &SymbolRef::Fqn("repo.helper".into()),
                 &Filter::default(),
@@ -609,6 +633,7 @@ mod tests {
             .unwrap();
         assert_eq!(cached.references.len(), 1);
         assert_eq!(cached.references[0].node.fqn, "repo.caller");
+        assert!(!cached_timed_out);
     }
 
     #[tokio::test]
@@ -648,7 +673,7 @@ mod tests {
             .await
             .unwrap();
 
-        let res = engine
+        let (res, timed_out) = engine
             .find_references(
                 &SymbolRef::Fqn("repo.helper".into()),
                 &Filter::default(),
@@ -659,12 +684,13 @@ mod tests {
             .unwrap();
         assert_eq!(res.references.len(), 1);
         assert_eq!(res.references[0].sites[0].start.line, 9);
+        assert!(!timed_out);
     }
 
     #[tokio::test]
     async fn find_callers_materializes_incoming_calls() {
         let (engine, mock) = scenario().await;
-        let res = engine
+        let (res, timed_out) = engine
             .find_callers(
                 &SymbolRef::Fqn("repo.helper".into()),
                 &Filter::default(),
@@ -677,6 +703,7 @@ mod tests {
         assert_eq!(res.items[0].node.fqn, "repo.caller");
         assert_eq!(res.items[0].call_sites.len(), 1);
         assert_eq!(res.items[0].call_sites[0].start.line, 7);
+        assert!(!timed_out);
     }
 
     #[tokio::test]
@@ -756,7 +783,7 @@ mod tests {
             }],
         );
 
-        let res = engine
+        let (res, timed_out) = engine
             .find_callers(
                 &SymbolRef::Fqn("repo.mod.helper".into()),
                 &Filter::default(),
@@ -768,12 +795,13 @@ mod tests {
         assert_eq!(res.items.len(), 1);
         assert_eq!(res.items[0].node.fqn, "repo.mod");
         assert_eq!(res.items[0].call_sites[0].start.line, 20);
+        assert!(!timed_out);
     }
 
     #[tokio::test]
     async fn find_callees_materializes_outgoing_calls() {
         let (engine, mock) = scenario().await;
-        let res = engine
+        let (res, timed_out) = engine
             .find_callees(
                 &SymbolRef::Fqn("repo.caller".into()),
                 &Filter::default(),
@@ -785,6 +813,7 @@ mod tests {
         assert_eq!(res.items.len(), 1);
         assert_eq!(res.items[0].node.fqn, "repo.helper");
         assert_eq!(res.items[0].call_sites[0].start.line, 7);
+        assert!(!timed_out);
     }
 
     #[tokio::test]
@@ -827,7 +856,7 @@ mod tests {
             .await
             .unwrap();
 
-        let hidden = engine
+        let (hidden, _timed_out) = engine
             .find_references(
                 &SymbolRef::Fqn("repo.helper".into()),
                 &Filter::default(),
@@ -838,7 +867,7 @@ mod tests {
             .unwrap();
         assert!(hidden.references.is_empty());
 
-        let shown = engine
+        let (shown, _timed_out) = engine
             .find_references(
                 &SymbolRef::Fqn("repo.helper".into()),
                 &Filter {
@@ -851,5 +880,48 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(shown.references.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn find_references_reports_timeout_from_materialize() {
+        let (engine, mut mock) = scenario().await;
+        mock.timeout_ops.insert("references");
+        let (res, timed_out) = engine
+            .find_references(
+                &SymbolRef::Fqn("repo.helper".into()),
+                &Filter::default(),
+                &Page::default(),
+                Some(&mock),
+            )
+            .await
+            .unwrap();
+        assert!(timed_out);
+        assert!(res.references.is_empty());
+    }
+
+    #[tokio::test]
+    async fn find_callers_reports_timeout_from_anchor_resolution() {
+        let (engine, mut mock) = scenario().await;
+        // `find_callers(Fqn(...))` never calls `definition`, so drive the
+        // timeout through the `At` anchor-resolution path instead.
+        mock.timeout_ops.insert("definition");
+        let (res, timed_out) = engine
+            .find_callers(
+                &SymbolRef::At {
+                    uri: URI.into(),
+                    line: 7,
+                    character: 4,
+                },
+                &Filter::default(),
+                &Page::default(),
+                Some(&mock),
+            )
+            .await
+            .unwrap();
+        assert!(timed_out);
+        // Anchor resolution falls back to the indexed node at the cursor
+        // position, which is inside `caller` — not `helper` — so no incoming
+        // calls are materialized for it.
+        assert!(res.items.is_empty());
     }
 }
