@@ -5,7 +5,9 @@
 //! `mcp` calls `query`; it holds no domain logic. See `docs/design/mcp-tools.md`
 //! and `docs/design/resilience.md`.
 
-mod dto;
+// `pub(crate)` (not private): the daemon module dispatches to `SemnavServer`'s
+// inherent tool methods directly, so it needs these same input/output DTOs.
+pub(crate) mod dto;
 mod server;
 
 pub use server::SemnavServer;

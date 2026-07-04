@@ -6,7 +6,7 @@
 
 use rmcp::ErrorData;
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::query::{
     CallGraphNode, CallGraphResult, Degradation, DegradeReason, Filter, FindDefinitionResult,
@@ -14,7 +14,7 @@ use crate::query::{
 };
 
 /// An occurrence position (`docs/design/mcp-tools.md` SymbolRef `at`).
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AtRef {
     pub uri: String,
     pub line: u32,
@@ -35,7 +35,7 @@ impl From<AtRef> for SymbolRef {
 /// enum) because sibling flattened fields (e.g. `FilterInput::language`) share
 /// the same JSON object as this one in `SymbolQueryInput`, and an untagged
 /// enum's per-variant `deny_unknown_fields` would reject those sibling keys.
-#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct SymbolRefInput {
     pub fqn: Option<String>,
     pub at: Option<AtRef>,
@@ -62,7 +62,7 @@ impl TryFrom<SymbolRefInput> for SymbolRef {
 
 /// `find_definition` only accepts an occurrence position — an fqn has no
 /// single "definition" to resolve to (`docs/design/mcp-tools.md`).
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FindDefinitionInput {
     pub at: AtRef,
 }
@@ -74,7 +74,7 @@ impl From<FindDefinitionInput> for SymbolRef {
 }
 
 /// Cross-tool narrowing (`docs/design/mcp-tools.md` Filter).
-#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct FilterInput {
     pub language: Option<String>,
     pub kind: Option<Vec<String>>,
@@ -95,7 +95,7 @@ impl From<FilterInput> for Filter {
 /// Cursor pagination request (`docs/design/mcp-tools.md` Page). `limit`
 /// defaults to 100 and is clamped to at least 1; `cursor` is the opaque token
 /// handed back as a prior response's `next_cursor`.
-#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct PageInput {
     pub limit: Option<u32>,
     pub cursor: Option<String>,
@@ -118,7 +118,7 @@ impl PageInput {
 }
 
 /// `find_symbol` request (`docs/design/mcp-tools.md`).
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FindSymbolInput {
     pub pattern: String,
     #[serde(rename = "match", default)]
@@ -146,7 +146,7 @@ impl FindSymbolInput {
 
 /// Shared request shape for `find_references`/`find_callers`/`find_callees`
 /// (`docs/design/mcp-tools.md`): a symbol ref, a filter, and a page.
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SymbolQueryInput {
     #[serde(flatten)]
     pub symbol: SymbolRefInput,
@@ -165,19 +165,19 @@ impl SymbolQueryInput {
 
 /// `read_range` request (`docs/design/mcp-tools.md`). `range` omitted reads
 /// the whole file.
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ReadRangeInput {
     pub uri: String,
     pub range: Option<RangeInput>,
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RangeInput {
     pub start: PositionInput,
     pub end: PositionInput,
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PositionInput {
     pub line: u32,
     pub character: u32,
@@ -196,13 +196,13 @@ impl ReadRangeInput {
 /// `restart_lsp` request: force a specific language's server to restart, or
 /// every provisioned language when `language` is omitted. A maintenance
 /// operation, not one of the 6 graph-query tools (`docs/design/mcp-tools.md`).
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RestartLspInput {
     pub language: Option<String>,
 }
 
 /// `restart_lsp` response: the languages whose server was actually reset.
-#[derive(Debug, Clone, serde::Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct RestartLspResult {
     pub restarted: Vec<String>,
 }
@@ -210,7 +210,7 @@ pub struct RestartLspResult {
 /// The degraded-response annotation, folded into a tool's output only when a
 /// degradation actually occurred (`docs/design/resilience.md`) — never
 /// serialized as `degraded: false`.
-#[derive(Debug, Clone, serde::Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct DegradeInfo {
     pub degraded: bool,
     pub degrade_reason: &'static str,
@@ -244,7 +244,7 @@ fn lsp_status_str(status: LspStatus) -> &'static str {
 /// `find_definition` response: the domain result plus an optional degradation
 /// annotation, flattened together (field names already match the wire
 /// contract).
-#[derive(Debug, Clone, serde::Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct FindDefinitionOutput {
     #[serde(flatten)]
     pub result: FindDefinitionResult,
@@ -262,7 +262,7 @@ impl From<(FindDefinitionResult, Option<Degradation>)> for FindDefinitionOutput 
 }
 
 /// `find_references` response: see [`FindDefinitionOutput`].
-#[derive(Debug, Clone, serde::Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct FindReferencesOutput {
     #[serde(flatten)]
     pub result: FindReferencesResult,
@@ -282,7 +282,7 @@ impl From<(FindReferencesResult, Option<Degradation>)> for FindReferencesOutput 
 /// `find_callers` response. Domain's `CallGraphResult.items` is renamed to
 /// `callers` on the wire, so this reconstructs fields explicitly rather than
 /// flattening.
-#[derive(Debug, Clone, serde::Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct FindCallersOutput {
     pub callers: Vec<CallGraphNode>,
     pub next_cursor: Option<String>,
@@ -301,7 +301,7 @@ impl From<(CallGraphResult, Option<Degradation>)> for FindCallersOutput {
 }
 
 /// `find_callees` response: see [`FindCallersOutput`].
-#[derive(Debug, Clone, serde::Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct FindCalleesOutput {
     pub callees: Vec<CallGraphNode>,
     pub next_cursor: Option<String>,

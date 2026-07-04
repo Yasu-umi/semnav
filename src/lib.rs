@@ -5,6 +5,7 @@
 //! thin CLI over this library. See `docs/design/crate-structure.md`.
 
 pub mod adapters;
+pub mod daemon;
 pub mod graph;
 pub mod indexer;
 pub mod lsp;
