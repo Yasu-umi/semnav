@@ -15,7 +15,7 @@ See [docs/vision.md](docs/vision.md) for the full rationale and [docs/design/](d
 * The graph is a **cache of LSP results**, not a source of truth — when it's stale, it's re-evaluated via LSP on the next query ([docs/design/indexing-and-cache.md](docs/design/indexing-and-cache.md)).
 * Nodes carry only metadata (`fqn` / `uri` / `range` / `kind` / `signature`, ...); source text is never cached in the graph and is read from disk on demand via `read_range`.
 * Edges that haven't been built yet (references / call hierarchy) are constructed on demand by querying the LSP, then cached for next time.
-* A filesystem watcher keeps the graph in sync with on-disk edits while `serve` is running, including rename tracking (see [docs/design/graph-model.md](docs/design/graph-model.md)).
+* A filesystem watcher keeps the graph in sync with on-disk edits while a `daemon` is running for `<root>`, including rename tracking (see [docs/design/graph-model.md](docs/design/graph-model.md)).
 * Semantic analysis is fully delegated to the underlying LSP server, so any language with an LSP implementation can in principle be supported. Currently supported: **Python** (pyright) and **TypeScript** (typescript-language-server).
 
 ## Requirements
@@ -39,13 +39,18 @@ The binary is produced at `target/release/semnav`.
 semnav discover <root>   list source files (Python/TS) under <root>
 semnav index <root>      index <root> into <root>/.semnav/graph.db
                          (provisions pyright/tsserver via npm; needs node + npm)
-semnav serve <root>      serve the 6 MCP tools over stdio against
-                         <root>/.semnav/graph.db (run `index` first)
+semnav serve <root>      serve the 7 MCP tools over stdio, proxied to a
+                         background daemon (auto-started; run `index` first)
+semnav daemon <root>     run the persistent daemon directly (usually auto-started by `serve`)
+semnav daemon stop <root> stop a running daemon for <root>
 ```
+
+`serve` holds no state itself: it auto-starts (or reuses) a background `semnav daemon <root>` process that owns the LSP servers and the graph, and forwards every tool call to it over a Unix socket. This lets the daemon stay warm — and keep LSP servers indexed — across repeated `serve` connections from the MCP client (see [docs/design/daemon-lifecycle.md](docs/design/daemon-lifecycle.md)).
 
 Environment:
 
 * `SEMNAV_CACHE_DIR` — override the index/cache directory (default: `<root>/.semnav`)
+* `SEMNAV_DAEMON_IDLE_TIMEOUT_SECS` — daemon self-shutdown after this many idle seconds (default: 1800)
 
 ### Typical flow
 
@@ -58,7 +63,7 @@ semnav serve /path/to/your/project
 
 ## MCP tools
 
-`serve` exposes 6 tools: `find_symbol`, `find_definition`, `find_references`, `find_callers`, `find_callees`, `read_range`. Full input/output schemas are documented in [docs/design/mcp-tools.md](docs/design/mcp-tools.md).
+`serve` exposes 7 tools: 6 query tools (`find_symbol`, `find_definition`, `find_references`, `find_callers`, `find_callees`, `read_range`) plus a `restart_lsp` maintenance tool for forcing a wedged language server to restart. Full input/output schemas are documented in [docs/design/mcp-tools.md](docs/design/mcp-tools.md).
 
 ## Documentation
 

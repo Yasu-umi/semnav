@@ -322,12 +322,12 @@ fn daemon_cmd(args: &[String]) -> ExitCode {
     runtime.block_on(run_daemon(&root))
 }
 
-/// Run a persistent daemon for `root`: the same `DbActor`/`QueryEngine`/
-/// `QueryRuntime`/`SemnavServer`/`FsWatcher` construction `run_serve` does,
-/// but bound to a Unix socket (`daemon::discovery::sock_path`) instead of
-/// stdio, and kept alive until signaled, told to stop, or idle
-/// (`docs/design/daemon-lifecycle.md`). Standalone in this step — nothing
-/// spawns it automatically yet; a future `run_serve` will.
+/// Run a persistent daemon for `root`: the `DbActor`/`QueryEngine`/
+/// `QueryRuntime`/`SemnavServer`/`FsWatcher` construction `run_serve` used to
+/// do itself, now bound to a Unix socket (`daemon::discovery::sock_path`)
+/// instead of stdio, and kept alive until signaled, told to stop, or idle
+/// (`docs/design/daemon-lifecycle.md`). Usually auto-spawned by `run_serve`
+/// via `ensure_daemon_running`, but also runnable directly for debugging.
 async fn run_daemon(root: &Path) -> ExitCode {
     let cache_dir = resolve_cache_dir(root);
     let servers_dir = cache_dir.join("servers");

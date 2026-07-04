@@ -6,7 +6,8 @@
 //! whole workspace from scratch (confirmed empirically; see the design doc).
 //!
 //! `serve` holds none of this module's server-side state: it never opens
-//! `graph.db` or an LSP supervisor directly once proxying is wired in (Step 3).
+//! `graph.db` or an LSP supervisor directly — see `client.rs` for its side
+//! of the connection.
 
 pub mod client;
 pub mod discovery;

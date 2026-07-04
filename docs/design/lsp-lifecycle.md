@@ -1,14 +1,16 @@
 # LSP Process & Lifecycle
 
-LSP server process management within the MCP process. Process model, failure detection, restarts, timeouts, shutdown.
+LSP server process management within the daemon process. Process model, failure detection, restarts, timeouts, shutdown.
 
 > Process & LSP lifecycle (A1 = process management / A2 = didOpen strategy, both below). For Graph behavior under degradation see [resilience.md](./resilience.md); for provisioning see [language-adapters.md](./language-adapters.md).
 
 ## Process Model
 
-* **One process per language** (per LanguageAdapter). Spawned as a child process of the MCP process, driven via JSON-RPC over stdio
+* **One process per language** (per LanguageAdapter). Spawned as a child process of the **daemon** process, driven via JSON-RPC over stdio
 * **Lazy startup**: started on the first query / first index for that language. Servers for unused languages are never started (saves resources)
-* The MCP process is the **sole client of the LSP server**. didChange is also unified through the Graph
+* The **daemon** is the **sole client of the LSP server**. didChange is also unified through the Graph
+
+> **Revised (2026-07, daemon step):** prior to this, "the MCP process" meant `semnav serve` itself, which owned the LSP servers for the lifetime of one client connection — every new connection meant a fresh, cold LSP process. `serve` is now a stateless stdio↔socket proxy (`docs/design/daemon-lifecycle.md`); a persistent `semnav daemon <root>` process owns the LSP supervisors instead, so they survive across many `serve` connections. Nothing about the health state machine, restart policy, or shutdown escalation below changed — only *which* process hosts them.
 
 ## Failure Detection
 
@@ -61,7 +63,9 @@ If `provision` fails (Node.js / Python not installed, server binary fetch failur
 
 ## Shutdown
 
-When the MCP process exits, all running LSP child processes are terminated in sequence:
+When the **daemon** process exits (idle timeout, explicit `semnav daemon stop <root>`, or a signal — `docs/design/daemon-lifecycle.md`), all running LSP child processes are terminated in sequence. **`serve` exiting terminates nothing** — that's the entire point of separating the two; a `serve` process (even `kill -9`'d) has no effect on the daemon or its LSP children.
+
+The escalation itself:
 
 1. `shutdown` request → `exit` request (LSP standard)
 2. 5s grace period → if no response, **SIGTERM**

@@ -62,6 +62,14 @@ LSP-dependent, on-demand edge tools (find_definition / find_references / find_ca
 
 By seeing `degraded: true`, the agent knows the result is limited by the cache. It can distinguish "callers/callees are few because of degradation" from "genuinely few," and, when needed, has the fallback of reading code directly via `read_range` (which is LSP-independent and always works).
 
+If a language's server stays wedged (alive but not recovering) despite the automatic restart policy, `restart_lsp` (`docs/design/mcp-tools.md`) lets the agent force a reset without restarting the whole process.
+
+> **Note (2026-07, daemon step):** LSP health state (and therefore degradation) is now tracked by the persistent `daemon` process (`docs/design/daemon-lifecycle.md`), not by `serve`. A `serve` session that connects to an already-warm daemon inherits whatever health state it already has — a second or third session typically sees *fewer* degradations than the first, since the first session's connection (or an earlier one) already paid any acquire-time cost.
+
+### Boundary with the daemon
+
+`serve` no longer acquires LSP clients or observes `AcquireError` itself — that only happens inside the `daemon` process, behind `DaemonClient`. If `serve` can't reach the daemon at all (it failed to start, or the socket is unreachable), that's a **startup failure** of `serve` itself (a hard error, matching the existing "`graph.db` not found" pattern), not a `degraded: true` response — there is no partial/degraded mode for "no daemon," since without it there's no tool to even attempt a cache-only read.
+
 ## Health recording in index_meta
 
 The following is recorded in the KV (`index_meta`) described in [graph-model.md](./graph-model.md):
@@ -70,7 +78,7 @@ The following is recorded in the KV (`index_meta`) described in [graph-model.md]
 * `lsp_last_success_at`: timestamp of last success
 * `lsp_consecutive_failures`: consecutive failure count
 
-In 0.0.1, a tool like `graph status` is out of scope (only the 6 Query API tools exist), so this is **for logging/debugging only**. It reaches the agent via the `degraded` flag.
+In 0.0.1, a tool like `graph status` is out of scope (only the 6 Query API tools plus `restart_lsp` exist), so this is **for logging/debugging only**. It reaches the agent via the `degraded` flag.
 
 ## Timeouts (finalized, implemented)
 

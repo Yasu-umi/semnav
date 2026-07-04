@@ -1,5 +1,5 @@
 //! Per-root daemon file layout under `<root>/.semnav/` and the liveness probe
-//! used by both `serve`'s auto-spawn path (Step 3) and `daemon stop`
+//! used by both `serve`'s auto-spawn path and `daemon stop`
 //! (`docs/design/daemon-lifecycle.md`).
 
 use std::path::{Path, PathBuf};
@@ -23,7 +23,7 @@ pub fn pid_path(cache_dir: &Path) -> PathBuf {
     cache_dir.join("daemon.pid")
 }
 
-/// `daemon.log` — the detached daemon's redirected stdout/stderr (Step 3).
+/// `daemon.log` — the detached daemon's redirected stdout/stderr.
 pub fn log_path(cache_dir: &Path) -> PathBuf {
     cache_dir.join("daemon.log")
 }

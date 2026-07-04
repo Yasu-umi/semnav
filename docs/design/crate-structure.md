@@ -6,7 +6,7 @@
 
 * Implementation language: **Rust**, distributed as a **single binary**
 * Dependency crates (finalized):
-  * `rmcp` — MCP server SDK (exposes 6 tools)
+  * `rmcp` — MCP server SDK (exposes 7 tools: 6 query + `restart_lsp`)
   * `rusqlite` (+ bundled SQLite, WAL) — persistent cache
   * `refinery` — migration runner (`embed_migrations!`, manages `migrations/*.sql`). Decision Point 3
   * `notify` — FS watcher (invalidation)
@@ -23,12 +23,13 @@ semnav/                 # bin crate
   migrations/V0001__init.sql
   src/
     main.rs             # bin, cli, cache_dir resolution
-    mcp/                # rmcp server, tools, DTOs
+    mcp/                # rmcp server: SemnavServer (daemon-side) + ProxyServer (serve-side), tools, DTOs
     graph/              # SQLite, CRUD, migration, is_external, db actor
     lsp/                # process, state machine, JSON-RPC, health
     adapters/           # LanguageAdapter trait + pyright/tsserver + provisioning
     indexer/            # file discovery, documentSymbol collection, watcher, invalidation
     query/              # on-demand edges, SymbolRef, read_range
+    daemon/             # serve<->daemon Unix-socket protocol, discovery/lock, accept loop
 ```
 
 * Fits the 0.0.1 scale, compiles fast, and is irrelevant to distribution (single binary either way)
@@ -40,15 +41,16 @@ Breakdown of each design doc's expected responsibility into the implementation m
 
 | Module | Responsibility | Basis doc |
 |---|---|---|
-| `mcp` | rmcp server, 6 tools (`find_symbol`/`definition`/`references`/`callers`/`callees`/`read_range`), DTOs, pagination cursor, degraded responses | [mcp-tools.md](./mcp-tools.md) / [resilience.md](./resilience.md) |
+| `mcp` | rmcp server: `SemnavServer` (daemon-side, calls `query` directly) and `ProxyServer` (serve-side, forwards to `daemon` over `DaemonClient`) — same 6 query tools (`find_symbol`/`definition`/`references`/`callers`/`callees`/`read_range`) plus the `restart_lsp` maintenance tool, DTOs, pagination cursor, degraded responses | [mcp-tools.md](./mcp-tools.md) / [resilience.md](./resilience.md) |
 | `graph` | SQLite (nodes/edges/events/index_meta) CRUD, `valid`/`orphan`/`generation`, FQN construction, `is_external` determination, refinery migration, **db actor** (sole ownership of the Connection) | [graph-model.md](./graph-model.md) |
 | `lsp` | Child process management (spawn/exit monitoring), health state machine, backoff, timeouts, **thin homegrown JSON-RPC** (Content-Length framing + id pairing), `workspaceFolders`/didOpen/didChange, health (`index_meta` KV) | [lsp-lifecycle.md](./lsp-lifecycle.md) |
 | `adapters` | `LanguageAdapter` trait, pyright/tsserver implementations, provisioning (isolated npm install), `map_symbol_kind`/`NodeKind`, hover refinement (`construct` extraction) | [language-adapters.md](./language-adapters.md) |
 | `indexer` | File discovery (`ignore`), serial documentSymbol collection, FS watcher (`notify`), invalidation flow, orphan reclamation | [indexing-and-cache.md](./indexing-and-cache.md) |
 | `query` | On-demand edge construction (definition/references/callHierarchy/typeDefinition/implementation), `SymbolRef` resolution (fqn\|at), Filter, `read_range` (direct FS read) | [mcp-tools.md](./mcp-tools.md) / [indexing-and-cache.md](./indexing-and-cache.md) |
-| `bin` / `cli` | Entry point, `discover`/`index`/`serve` CLI, `SEMNAV_CACHE_DIR`/`.semnav` resolution, provisioning guidance messages, `shutdown` (SIGTERM/SIGKILL) | [language-adapters.md](./language-adapters.md) Distribution / [lsp-lifecycle.md](./lsp-lifecycle.md) Shutdown |
+| `daemon` | `serve`↔`daemon` Unix-socket protocol (NDJSON envelopes over the 7 ops), discovery/liveness probe, spawn-race lock (`flock`), the daemon's own accept loop + idle-timeout self-shutdown | [daemon-lifecycle.md](./daemon-lifecycle.md) |
+| `bin` / `cli` | Entry point, `discover`/`index`/`serve`/`daemon`/`daemon stop` CLI, `SEMNAV_CACHE_DIR`/`.semnav` resolution, provisioning guidance messages, `shutdown` (SIGTERM/SIGKILL) | [language-adapters.md](./language-adapters.md) Distribution / [lsp-lifecycle.md](./lsp-lifecycle.md) Shutdown / [daemon-lifecycle.md](./daemon-lifecycle.md) |
 
-> `mcp` (rmcp boundary, DTO shaping) calls `query` (Graph↔LSP orchestration). The boundary between them was finalized as separate in Decision Point 5.
+> `mcp` (rmcp boundary, DTO shaping) calls `query` (Graph↔LSP orchestration) on the daemon side, or `daemon::client::DaemonClient` on the serve side. The `mcp`/`query` boundary was finalized as separate in Decision Point 5; the `serve`/`daemon` process split is Decision Point 6.
 
 ## Decisions and rationale
 
@@ -96,10 +98,18 @@ Implementation pattern (idiomatic):
 * `mcp` = rmcp boundary, DTO shaping, cursor, attaching degraded status. `mcp` calls `query`
 * Reason not to merge them: `query`'s on-demand edge construction (cache lookup → LSP fallback → UPSERT → response) is domain logic and should not be mixed with the transport layer
 
+### Decision Point 6: hand-rolled NDJSON over Unix socket for `serve`↔`daemon` — adopted / rmcp streamable-HTTP rejected
+
+pyright has no cross-process cache (confirmed empirically: a fresh process re-scans a ~17k-file repo from scratch every time, ~60s+), so a persistent `daemon` process now owns the LSP supervisors across many `serve` connections (`daemon-lifecycle.md`). This needed *some* IPC between the two processes.
+
+* **Rejected: rmcp's `transport-streamable-http-server`** bound to a `UnixListener`. Architecturally possible (`SemnavServer` could be reused unmodified as the daemon-side handler), but rmcp ships no server-side Unix-socket precedent — only `transport-streamable-http-client-unix-socket` exists, client-side only. Standing up the server side means hand-wiring `hyper`/`hyper-util` HTTP/1.1 framing onto a Unix-socket accept loop, pulling in `hyper`, `tower`, and friends, purely to shuttle 7 fixed operations between two processes of the *same binary*. None of streamable-HTTP's real value (multi-session HTTP semantics, resumable SSE) applies here — there's exactly one kind of client (a local `serve` process).
+* **Adopted: newline-delimited JSON over a raw `UnixStream`** (`daemon/protocol.rs`), reusing the existing tool DTOs (`mcp/dto.rs`, `query/dto.rs`) verbatim as request/response payloads — one JSON object per line, multiplexed by a request id. This mirrors the same "own the transport directly, keep it small" reasoning as Decision Point 2's homegrown LSP JSON-RPC client, and the client-side actor (`daemon/client.rs::DaemonClient`) is structurally the same `mpsc`-driven request/reply pattern as `lsp::client::LspClient`.
+* Cost: the DTOs needed `Deserialize` added (`mcp/dto.rs`/`query/dto.rs` previously only needed `Serialize`, being tool-call *outputs*), and `DegradeInfo`'s `degrade_reason`/`lsp_status` fields moved from `&'static str` to `String` (a `&'static str` can't implement `Deserialize`).
+
 ### tracer crate (dynamic-graph) — not reserved in 0.0.1
 
 [dynamic-graph.md](./dynamic-graph.md) is Future work. 0.0.1 only reserves the `events` table slot ([graph-model.md](./graph-model.md)). A crate boundary will be carved out when the tracer is added in the future.
 
 ## Implementation Status
 
-The structure above and all 6 decision points have been fully implemented (including `migrations/V0001__init.sql`, the db actor, and the homegrown JSON-RPC client).
+The structure above and the original 6 decision points have been fully implemented (including `migrations/V0001__init.sql`, the db actor, and the homegrown JSON-RPC client). Decision Point 6 (the `daemon` module and the `serve`↔`daemon` protocol) was added later (2026-07, daemon step) and is also fully implemented.

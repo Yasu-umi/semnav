@@ -4,6 +4,8 @@ The tool interface that the Semantic Graph MCP exposes to agents. 0.0.1 provides
 
 > MCP tool interface (C). See [graph-model.md](./graph-model.md) for the internal schema, [lsp-integration.md](./lsp-integration.md) for the LSP origin of each edge, and [indexing-and-cache.md](./indexing-and-cache.md) for on-demand Edge construction.
 
+> **Runtime topology (2026-07, daemon step):** from the MCP client's perspective nothing below changed — same 7 tools, same wire format. Internally, `semnav serve` (what the client actually spawns) no longer executes these tools itself; it proxies each call to a persistent background `semnav daemon` process. See [daemon-lifecycle.md](./daemon-lifecycle.md).
+
 ## Design principles
 
 1. **The Graph does not hold body text.** The Graph keeps only range metadata (`range_*`/`sel_*`); source code body is read from the FS on demand by `read_range`. This keeps it always up to date, avoids the need for didChange sync, and keeps the Graph size down.
