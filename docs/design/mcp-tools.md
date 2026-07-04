@@ -1,10 +1,10 @@
 # MCP Tools (0.0.1)
 
-The tool interface that the Semantic Graph MCP exposes to agents. 0.0.1 provides **6 query tools** (`find_symbol` / `find_definition` / `find_references` / `find_callers` / `find_callees` / `read_range`) plus **1 maintenance tool** (`restart_lsp`, see below).
+The tool interface that the Semantic Graph MCP exposes to agents. 0.0.1 provides **7 query tools** (`find_symbol` / `find_definition` / `find_references` / `find_callers` / `find_callees` / `find_call_path` / `read_range`) plus **1 maintenance tool** (`restart_lsp`, see below).
 
 > MCP tool interface (C). See [graph-model.md](./graph-model.md) for the internal schema, [lsp-integration.md](./lsp-integration.md) for the LSP origin of each edge, and [indexing-and-cache.md](./indexing-and-cache.md) for on-demand Edge construction.
 
-> **Runtime topology (2026-07, daemon step):** from the MCP client's perspective nothing below changed — same 7 tools, same wire format. Internally, `semnav serve` (what the client actually spawns) no longer executes these tools itself; it proxies each call to a persistent background `semnav daemon` process. See [daemon-lifecycle.md](./daemon-lifecycle.md).
+> **Runtime topology (2026-07, daemon step):** from the MCP client's perspective nothing below changed — same 8 tools, same wire format. Internally, `semnav serve` (what the client actually spawns) no longer executes these tools itself; it proxies each call to a persistent background `semnav daemon` process. See [daemon-lifecycle.md](./daemon-lifecycle.md).
 
 ## Design principles
 
@@ -161,6 +161,29 @@ output = {
 * tsserver: `to` sometimes points to the **type-resolved target (an interface method)** → the query side corrects this to the implementing class's method via the `implements` edge ([lsp-integration.md](./lsp-integration.md))
 * **Precise content-hash cache, not cache-first + background refresh**: unlike `find_callers`/`find_references`, the callee list is fully determined by the anchor's own file, so a byte-identical anchor file since the last materialization serves an exact cached answer with no LSP call and no `refreshing` field at all ([lsp-integration.md](./lsp-integration.md))
 * **`with_signature`**: best-effort hover backfill of `signature` on each returned `node` — see "Populating `signature`" below
+
+### find_call_path — multi-hop reachability between two symbols
+
+```
+input  = {
+  from:          SymbolRef,
+  to:            SymbolRef,
+  max_depth?:    uint = 8,    // clamped to [1, 20]
+  max_lsp_calls?: uint = 30,  // clamped to [0, 200]
+}
+output = {
+  reachable:     bool,
+  path:          Node[],      // from -> ... -> to inclusive; empty when reachable=false
+  limit_reached: bool,
+}
+```
+
+* Answers "does `from` reach `to` through zero or more `calls` hops?" — the multi-hop counterpart to `find_callers`/`find_callees`'s single hop, for layered-architecture questions like "does this entry point ever reach that low-level dependency?" without the caller manually chaining `find_callees` one layer at a time
+* **Breadth-first**, so `path` is a *shortest* path when `reachable` is `true` (not necessarily the only one)
+* **Always expands, bounded by a budget** — deliberately not cache-only + opt-in expansion. The `calls` graph is materialized lazily per query ([lsp-integration.md](./lsp-integration.md)), so a cache-only reachability answer can't distinguish "provably doesn't call" from "hasn't been queried yet." Every unvisited node's outgoing edges are refreshed via the same precise content-hash cache `find_callees` uses — a byte-identical file since the last materialization is free, a changed/never-seen file costs one unit of `max_lsp_calls`
+* **`limit_reached`** is the field that keeps a `reachable: false` answer honest: it's `true` whenever the search stopped — `max_depth` hit, `max_lsp_calls` exhausted, or no LSP client available at all — *before* every reachable node could be proven exhausted. `{reachable: false, limit_reached: true}` means "not found within these limits," not a proof of non-reachability; only `{reachable: false, limit_reached: false}` is an exhaustive negative
+* `from == to` (same resolved anchor) is trivially `reachable: true` with a one-node `path`, at zero LSP cost
+* Origin: `callHierarchy/outgoingCalls`, the same edge type as `find_callees` (`calls`)
 
 ### Populating `signature`
 

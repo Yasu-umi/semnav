@@ -13,11 +13,11 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::mcp::dto::{
-    CallGraphQueryInput, FindDefinitionInput, FindSymbolInput, ReadRangeInput, RestartLspInput,
-    SymbolQueryInput,
+    CallGraphQueryInput, FindCallPathInput, FindDefinitionInput, FindSymbolInput, ReadRangeInput,
+    RestartLspInput, SymbolQueryInput,
 };
 
-/// One of the 7 tools, or the daemon-only `Shutdown` control message. Mirrors
+/// One of the 8 tools, or the daemon-only `Shutdown` control message. Mirrors
 /// `SemnavServer`'s tool set (`src/mcp/server.rs`) so the daemon's accept loop
 /// can dispatch each variant to the matching inherent method.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +28,7 @@ pub enum DaemonRequest {
     FindReferences(SymbolQueryInput),
     FindCallers(CallGraphQueryInput),
     FindCallees(CallGraphQueryInput),
+    FindCallPath(FindCallPathInput),
     ReadRange(ReadRangeInput),
     RestartLsp(RestartLspInput),
     /// Not a query op: tells the daemon to run its graceful-shutdown path
@@ -87,7 +88,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcp::dto::{AtRef, FilterInput, PageInput, SymbolRefInput};
+    use crate::mcp::dto::{AtRef, FilterInput, FindCallPathInput, PageInput, SymbolRefInput};
     use tokio::io::duplex;
 
     fn sample_requests() -> Vec<DaemonRequest> {
@@ -115,6 +116,18 @@ mod tests {
                 },
                 filter: FilterInput::default(),
                 page: PageInput::default(),
+            }),
+            DaemonRequest::FindCallPath(FindCallPathInput {
+                from: SymbolRefInput {
+                    fqn: Some("repo.foo".into()),
+                    at: None,
+                },
+                to: SymbolRefInput {
+                    fqn: Some("repo.bar".into()),
+                    at: None,
+                },
+                max_depth: None,
+                max_lsp_calls: None,
             }),
             DaemonRequest::ReadRange(ReadRangeInput {
                 uri: "file:///repo/mod.py".into(),

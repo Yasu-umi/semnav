@@ -5,16 +5,17 @@
 //! `Some` they construct edges on demand first.
 
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 
 use anyhow::{Result, anyhow};
 
 use crate::adapters::NodeKind;
-use crate::graph::Direction;
+use crate::graph::{Direction, Node};
 
 use super::dto::{
-    CallGraphNode, CallGraphResult, FindDefinitionResult, FindReferencesResult, FindSymbolResult,
-    NodeDto, Position, RangeDto, ReadRangeResult, ReferenceGroup,
+    CallGraphNode, CallGraphResult, FindCallPathResult, FindDefinitionResult, FindReferencesResult,
+    FindSymbolResult, NodeDto, Position, RangeDto, ReadRangeResult, ReferenceGroup,
 };
 use super::filter::{Filter, MatchMode, Page, SortKey, SymbolRef};
 use super::lsp_query::{LspQueryClient, is_timeout};
@@ -298,6 +299,147 @@ impl QueryEngine {
             .read_calls_page(anchor_id, Direction::Outgoing, filter, page)
             .await?;
         Ok((result, timed_out))
+    }
+
+    /// Multi-hop reachability: does `from` reach `to` through zero or more
+    /// outgoing `calls` hops (`docs/design/mcp-tools.md` "find_call_path")?
+    /// Breadth-first, so the first path found is shortest; each unvisited node
+    /// is expanded via the same precise content-hash cache `find_callees` uses
+    /// ([`Self::expand_outgoing_calls`]), spending one unit of `max_lsp_calls`
+    /// only when a live materialization round trip is actually needed (a fresh
+    /// cache hit is free). `max_depth` caps hops from `from`.
+    ///
+    /// The returned `bool` is `true` if any underlying LSP call timed out.
+    /// `FindCallPathResult::limit_reached` is `true` whenever the search
+    /// stopped — depth cap, budget, or a missing/unresolvable client — before
+    /// it could prove `to` unreachable, so callers don't mistake "not found
+    /// within these limits" for a proven negative.
+    pub async fn find_call_path<C: LspQueryClient>(
+        &self,
+        from: &SymbolRef,
+        to: &SymbolRef,
+        max_depth: u32,
+        max_lsp_calls: u32,
+        client: Option<&C>,
+    ) -> Result<(FindCallPathResult, bool)> {
+        let not_found = |limit_reached: bool| FindCallPathResult {
+            reachable: false,
+            path: Vec::new(),
+            limit_reached,
+        };
+        let (from_anchor, from_timed_out) = self.resolve_anchor_id(from, client).await?;
+        let (to_anchor, to_timed_out) = self.resolve_anchor_id(to, client).await?;
+        let mut timed_out = from_timed_out || to_timed_out;
+        let (Some((from_id, from_node)), Some((to_id, _))) = (from_anchor, to_anchor) else {
+            // An unresolvable endpoint isn't a search limit — there's nothing
+            // to search from/for.
+            return Ok((not_found(false), timed_out));
+        };
+        if from_id == to_id {
+            return Ok((
+                FindCallPathResult {
+                    reachable: true,
+                    path: vec![NodeDto::from_node(&from_node)],
+                    limit_reached: false,
+                },
+                timed_out,
+            ));
+        }
+
+        let mut visited: HashSet<i64> = HashSet::from([from_id]);
+        let mut queue: VecDeque<(i64, Node, Vec<Node>)> = VecDeque::new();
+        queue.push_back((from_id, from_node.clone(), vec![from_node]));
+        let mut remaining_lsp_calls = max_lsp_calls;
+        let mut limit_reached = false;
+
+        while let Some((node_id, node, path)) = queue.pop_front() {
+            // `path.len()` already counts `node` itself, so this is the hop
+            // count so far; expanding past `max_depth` would produce a path
+            // longer than the caller asked for.
+            if path.len() as u32 > max_depth {
+                limit_reached = true;
+                continue;
+            }
+            let (usable, expand_timed_out) = self
+                .expand_outgoing_calls(node_id, &node, client, &mut remaining_lsp_calls)
+                .await?;
+            timed_out |= expand_timed_out;
+            if !usable {
+                limit_reached = true;
+            }
+            let neighbors = self
+                .db
+                .get_neighbors(node_id, "calls", Direction::Outgoing)
+                .await?;
+            for (callee, _site) in group_by_node(neighbors) {
+                let Some(callee_id) = callee.id else {
+                    continue;
+                };
+                if callee_id == to_id {
+                    let mut found_path = path;
+                    found_path.push(callee);
+                    return Ok((
+                        FindCallPathResult {
+                            reachable: true,
+                            path: found_path.iter().map(NodeDto::from_node).collect(),
+                            limit_reached: false,
+                        },
+                        timed_out,
+                    ));
+                }
+                if visited.insert(callee_id) {
+                    let mut next_path = path.clone();
+                    next_path.push(callee.clone());
+                    queue.push_back((callee_id, callee, next_path));
+                }
+            }
+        }
+
+        Ok((not_found(limit_reached), timed_out))
+    }
+
+    /// Ensure `anchor`'s outgoing `calls` edges are fresh before
+    /// [`Self::find_call_path`]'s BFS reads them, reusing `find_callees`'s
+    /// precise content-hash cache: an unchanged file's cached edges are
+    /// trusted for free, so only an actual cache miss spends one unit of
+    /// `remaining_lsp_calls`. Returns `(usable, timed_out)` — `usable` is
+    /// `false` when no client was supplied, or the file changed but the
+    /// budget was already spent, in which case the node's cached outgoing
+    /// edges may be stale or incomplete and the caller must not treat an
+    /// empty read as proof of "no callees."
+    async fn expand_outgoing_calls<C: LspQueryClient>(
+        &self,
+        anchor_id: i64,
+        anchor: &Node,
+        client: Option<&C>,
+        remaining_lsp_calls: &mut u32,
+    ) -> Result<(bool, bool)> {
+        let Some(client) = client else {
+            return Ok((false, false));
+        };
+        let text = self.read_file_text(&anchor.uri).await;
+        if let Some(text) = &text {
+            let _ = client.open_document(&anchor.uri, text).await;
+        }
+        let hash = text.as_deref().map(content_hash);
+        if let Some(hash) = &hash {
+            let cached = self.db.get_callees_cache_hash(anchor_id).await?;
+            if cached.as_deref() == Some(hash.as_str()) {
+                return Ok((true, false));
+            }
+        }
+        if *remaining_lsp_calls == 0 {
+            return Ok((false, false));
+        }
+        *remaining_lsp_calls -= 1;
+        self.db.invalidate_outgoing_calls(anchor_id).await?;
+        let timed_out = self
+            .materialize_call_edges(anchor_id, anchor, Direction::Outgoing, client)
+            .await?;
+        if let Some(hash) = &hash {
+            self.db.set_callees_cache_hash(anchor_id, hash).await?;
+        }
+        Ok((true, timed_out))
     }
 
     /// Shared callers/callees body: resolve the anchor, optionally materialize
@@ -1326,5 +1468,321 @@ mod tests {
         // position, which is inside `caller` — not `helper` — so no incoming
         // calls are materialized for it.
         assert!(res.items.is_empty());
+    }
+
+    // --- find_call_path ---
+    //
+    // A 4-node call chain `a -> b -> c -> d`, plus an isolated `z` with no
+    // calls at all, keyed by each node's `sel` position (mirroring
+    // `scenario()`'s single caller/helper pair). Unlike `callees_cache_scenario`,
+    // no file is ever written to disk, so `expand_outgoing_calls` always
+    // takes its "unreadable file, no freshness key" branch — every expansion
+    // with budget remaining unconditionally spends one unit, which is exactly
+    // what makes the budget-exhaustion tests below deterministic.
+
+    fn chain_item(name: &str, line: u32) -> CallHierarchyItem {
+        CallHierarchyItem {
+            name: name.into(),
+            kind: 12,
+            uri: URI.into(),
+            range: rng(line, 0, line + 2, 0),
+            selection_range: rng(line, 4, line, 4 + name.len() as u32),
+            raw: json!({ "uri": URI, "name": name, "data": name }),
+        }
+    }
+
+    async fn chain_scenario() -> (QueryEngine, MockLspQueryClient) {
+        let dir = tempdir().unwrap();
+        let db = crate::graph::DbActor::spawn(&dir.path().join("g.db")).unwrap();
+        std::mem::forget(dir);
+        let engine = QueryEngine::new(db, "file:///repo".to_string());
+
+        for (fqn, name, line) in [
+            ("repo.a", "a", 0u32),
+            ("repo.b", "b", 10),
+            ("repo.c", "c", 20),
+            ("repo.d", "d", 30),
+            ("repo.z", "z", 40),
+        ] {
+            engine
+                .db()
+                .upsert_node(func(fqn, name, line as i64))
+                .await
+                .unwrap();
+        }
+
+        let item_a = chain_item("a", 0);
+        let item_b = chain_item("b", 10);
+        let item_c = chain_item("c", 20);
+        let item_d = chain_item("d", 30);
+
+        let mut mock = MockLspQueryClient::new();
+        mock.prepare
+            .insert((URI.to_string(), 0, 4), vec![item_a.clone()]);
+        mock.prepare
+            .insert((URI.to_string(), 10, 4), vec![item_b.clone()]);
+        mock.prepare
+            .insert((URI.to_string(), 20, 4), vec![item_c.clone()]);
+        mock.prepare
+            .insert((URI.to_string(), 30, 4), vec![item_d.clone()]);
+        // `z` has no `prepare` entry, so `prepareCallHierarchy` for it yields
+        // no items and `d` has no `outgoing` entry — both dead ends.
+
+        mock.outgoing.insert(
+            item_a.key(),
+            vec![OutgoingCall {
+                to: item_b.clone(),
+                from_ranges: vec![rng(1, 4, 1, 5)],
+            }],
+        );
+        mock.outgoing.insert(
+            item_b.key(),
+            vec![OutgoingCall {
+                to: item_c.clone(),
+                from_ranges: vec![rng(11, 4, 11, 5)],
+            }],
+        );
+        mock.outgoing.insert(
+            item_c.key(),
+            vec![OutgoingCall {
+                to: item_d.clone(),
+                from_ranges: vec![rng(21, 4, 21, 5)],
+            }],
+        );
+
+        (engine, mock)
+    }
+
+    #[tokio::test]
+    async fn find_call_path_same_node_is_trivially_reachable_at_zero_cost() {
+        let (engine, mock) = chain_scenario().await;
+        let (res, timed_out) = engine
+            .find_call_path(
+                &SymbolRef::Fqn("repo.a".into()),
+                &SymbolRef::Fqn("repo.a".into()),
+                10,
+                10,
+                Some(&mock),
+            )
+            .await
+            .unwrap();
+        assert!(res.reachable);
+        assert_eq!(res.path.len(), 1);
+        assert_eq!(res.path[0].fqn, "repo.a");
+        assert!(!res.limit_reached);
+        assert!(!timed_out);
+        assert_eq!(
+            mock.call_count("prepareCallHierarchy"),
+            0,
+            "from == to must short-circuit before touching the LSP"
+        );
+    }
+
+    #[tokio::test]
+    async fn find_call_path_finds_direct_one_hop_path() {
+        let (engine, mock) = chain_scenario().await;
+        let (res, timed_out) = engine
+            .find_call_path(
+                &SymbolRef::Fqn("repo.a".into()),
+                &SymbolRef::Fqn("repo.b".into()),
+                10,
+                10,
+                Some(&mock),
+            )
+            .await
+            .unwrap();
+        assert!(res.reachable);
+        assert_eq!(
+            res.path.iter().map(|n| n.fqn.as_str()).collect::<Vec<_>>(),
+            vec!["repo.a", "repo.b"]
+        );
+        assert!(!res.limit_reached);
+        assert!(!timed_out);
+    }
+
+    #[tokio::test]
+    async fn find_call_path_finds_multi_hop_shortest_path() {
+        let (engine, mock) = chain_scenario().await;
+        let (res, _) = engine
+            .find_call_path(
+                &SymbolRef::Fqn("repo.a".into()),
+                &SymbolRef::Fqn("repo.d".into()),
+                10,
+                10,
+                Some(&mock),
+            )
+            .await
+            .unwrap();
+        assert!(res.reachable);
+        assert_eq!(
+            res.path.iter().map(|n| n.fqn.as_str()).collect::<Vec<_>>(),
+            vec!["repo.a", "repo.b", "repo.c", "repo.d"]
+        );
+        assert!(!res.limit_reached);
+    }
+
+    #[tokio::test]
+    async fn find_call_path_unreachable_within_budget_is_an_exhaustive_negative() {
+        let (engine, mock) = chain_scenario().await;
+        // `z` is isolated — no edge in the chain ever reaches it — and the
+        // depth/budget here are generous enough to fully expand every
+        // reachable node, so this is a *proven* negative.
+        let (res, _) = engine
+            .find_call_path(
+                &SymbolRef::Fqn("repo.a".into()),
+                &SymbolRef::Fqn("repo.z".into()),
+                10,
+                10,
+                Some(&mock),
+            )
+            .await
+            .unwrap();
+        assert!(!res.reachable);
+        assert!(
+            !res.limit_reached,
+            "the whole reachable set was exhausted within the given limits"
+        );
+    }
+
+    #[tokio::test]
+    async fn find_call_path_depth_cap_marks_search_inconclusive() {
+        let (engine, mock) = chain_scenario().await;
+        // `d` is 3 hops away; a 1-hop cap can't reach it, and must say so
+        // rather than claiming a proven "not reachable".
+        let (res, _) = engine
+            .find_call_path(
+                &SymbolRef::Fqn("repo.a".into()),
+                &SymbolRef::Fqn("repo.d".into()),
+                1,
+                10,
+                Some(&mock),
+            )
+            .await
+            .unwrap();
+        assert!(!res.reachable);
+        assert!(res.limit_reached);
+    }
+
+    #[tokio::test]
+    async fn find_call_path_lsp_budget_exhausted_marks_search_inconclusive() {
+        let (engine, mock) = chain_scenario().await;
+        // Only enough budget to expand `a` itself; `b` is discovered but
+        // never expanded, so the search cannot rule out `d`.
+        let (res, _) = engine
+            .find_call_path(
+                &SymbolRef::Fqn("repo.a".into()),
+                &SymbolRef::Fqn("repo.d".into()),
+                10,
+                1,
+                Some(&mock),
+            )
+            .await
+            .unwrap();
+        assert!(!res.reachable);
+        assert!(res.limit_reached);
+        assert_eq!(
+            mock.call_count("prepareCallHierarchy"),
+            1,
+            "the budget must gate the LSP call itself, not just get ignored"
+        );
+    }
+
+    #[tokio::test]
+    async fn find_call_path_without_a_client_is_inconclusive_when_nothing_is_cached() {
+        let (engine, _mock) = chain_scenario().await;
+        let (res, timed_out) = engine
+            .find_call_path(
+                &SymbolRef::Fqn("repo.a".into()),
+                &SymbolRef::Fqn("repo.b".into()),
+                10,
+                10,
+                None::<&MockLspQueryClient>,
+            )
+            .await
+            .unwrap();
+        assert!(!res.reachable);
+        assert!(
+            res.limit_reached,
+            "no client and nothing cached ⇒ the negative is not proven"
+        );
+        assert!(!timed_out);
+    }
+
+    #[tokio::test]
+    async fn find_call_path_without_a_client_still_uses_precached_edges() {
+        let (engine, _mock) = chain_scenario().await;
+        let a = engine
+            .db()
+            .get_node_by_fqn("repo.a")
+            .await
+            .unwrap()
+            .unwrap();
+        let b = engine
+            .db()
+            .get_node_by_fqn("repo.b")
+            .await
+            .unwrap()
+            .unwrap();
+        engine
+            .db()
+            .upsert_edge(Edge {
+                id: None,
+                src_id: a.id.unwrap(),
+                dst_id: b.id.unwrap(),
+                edge_type: "calls".into(),
+                site: Some(Site {
+                    uri: URI.into(),
+                    range: GRange {
+                        start_line: 1,
+                        start_col: 4,
+                        end_line: 1,
+                        end_col: 5,
+                    },
+                }),
+                valid: true,
+            })
+            .await
+            .unwrap();
+
+        let (res, _) = engine
+            .find_call_path(
+                &SymbolRef::Fqn("repo.a".into()),
+                &SymbolRef::Fqn("repo.b".into()),
+                10,
+                10,
+                None::<&MockLspQueryClient>,
+            )
+            .await
+            .unwrap();
+        assert!(res.reachable);
+        assert_eq!(
+            res.path.iter().map(|n| n.fqn.as_str()).collect::<Vec<_>>(),
+            vec!["repo.a", "repo.b"]
+        );
+        assert!(
+            !res.limit_reached,
+            "finding the target makes the limit question moot"
+        );
+    }
+
+    #[tokio::test]
+    async fn find_call_path_unresolvable_endpoint_is_not_a_search_limit() {
+        let (engine, mock) = chain_scenario().await;
+        let (res, _) = engine
+            .find_call_path(
+                &SymbolRef::Fqn("repo.a".into()),
+                &SymbolRef::Fqn("repo.nope".into()),
+                10,
+                10,
+                Some(&mock),
+            )
+            .await
+            .unwrap();
+        assert!(!res.reachable);
+        assert!(res.path.is_empty());
+        assert!(
+            !res.limit_reached,
+            "an unresolvable endpoint means there's nothing to search, not that a search was cut short"
+        );
     }
 }

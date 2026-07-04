@@ -109,6 +109,17 @@ impl Filter {
 /// client-supplied limit can't force an unbounded scan/response.
 pub const MAX_PAGE_LIMIT: usize = 500;
 
+/// `find_call_path`'s default/max hop cap and LSP-call budget
+/// (`docs/design/mcp-tools.md` "find_call_path"). The BFS always expands a
+/// cold node via a live call-hierarchy round trip rather than silently
+/// stopping at whatever's already cached (a cache-only "not reachable" would
+/// be indistinguishable from "never queried") — these bounds exist only to
+/// keep a wide fan-out from turning one request into hundreds of round trips.
+pub const DEFAULT_CALL_PATH_MAX_DEPTH: u32 = 8;
+pub const MAX_CALL_PATH_MAX_DEPTH: u32 = 20;
+pub const DEFAULT_CALL_PATH_LSP_BUDGET: u32 = 30;
+pub const MAX_CALL_PATH_LSP_BUDGET: u32 = 200;
+
 /// Cursor pagination: a page size and an opaque resumption token
 /// (`docs/design/mcp-tools.md` Page).
 #[derive(Debug, Clone)]

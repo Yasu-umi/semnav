@@ -9,8 +9,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::query::{
-    CallGraphNode, CallGraphResult, Degradation, DegradeReason, Filter, FindDefinitionResult,
-    FindReferencesResult, FindSymbolOptions, LspStatus, MAX_PAGE_LIMIT, MatchMode, Page, SymbolRef,
+    CallGraphNode, CallGraphResult, DEFAULT_CALL_PATH_LSP_BUDGET, DEFAULT_CALL_PATH_MAX_DEPTH,
+    Degradation, DegradeReason, Filter, FindCallPathResult, FindDefinitionResult,
+    FindReferencesResult, FindSymbolOptions, LspStatus, MAX_CALL_PATH_LSP_BUDGET,
+    MAX_CALL_PATH_MAX_DEPTH, MAX_PAGE_LIMIT, MatchMode, Page, SymbolRef,
 };
 
 /// An occurrence position (`docs/design/mcp-tools.md` SymbolRef `at`).
@@ -203,6 +205,38 @@ impl CallGraphQueryInput {
     }
 }
 
+/// `find_call_path` request (`docs/design/mcp-tools.md`): does `from` reach
+/// `to` through zero or more `calls` hops? `max_depth`/`max_lsp_calls` bound
+/// the BFS (clamped server-side); both default when omitted.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FindCallPathInput {
+    pub from: SymbolRefInput,
+    pub to: SymbolRefInput,
+    /// Max `calls` hops from `from` before giving up. Defaults to
+    /// `DEFAULT_CALL_PATH_MAX_DEPTH`, clamped to `[1, MAX_CALL_PATH_MAX_DEPTH]`.
+    pub max_depth: Option<u32>,
+    /// Max live call-hierarchy round trips spent expanding cold nodes before
+    /// giving up. Defaults to `DEFAULT_CALL_PATH_LSP_BUDGET`, clamped to
+    /// `[0, MAX_CALL_PATH_LSP_BUDGET]`.
+    pub max_lsp_calls: Option<u32>,
+}
+
+impl FindCallPathInput {
+    pub fn into_parts(self) -> Result<(SymbolRef, SymbolRef, u32, u32), ErrorData> {
+        let from = self.from.try_into()?;
+        let to = self.to.try_into()?;
+        let max_depth = self
+            .max_depth
+            .unwrap_or(DEFAULT_CALL_PATH_MAX_DEPTH)
+            .clamp(1, MAX_CALL_PATH_MAX_DEPTH);
+        let max_lsp_calls = self
+            .max_lsp_calls
+            .unwrap_or(DEFAULT_CALL_PATH_LSP_BUDGET)
+            .clamp(0, MAX_CALL_PATH_LSP_BUDGET);
+        Ok((from, to, max_depth, max_lsp_calls))
+    }
+}
+
 /// `read_range` request (`docs/design/mcp-tools.md`). `range` omitted reads
 /// the whole file.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -387,6 +421,24 @@ impl From<(CallGraphResult, Option<Degradation>)> for FindCalleesOutput {
     }
 }
 
+/// `find_call_path` response: see [`FindDefinitionOutput`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FindCallPathOutput {
+    #[serde(flatten)]
+    pub result: FindCallPathResult,
+    #[serde(flatten)]
+    pub degrade: Option<DegradeInfo>,
+}
+
+impl From<(FindCallPathResult, Option<Degradation>)> for FindCallPathOutput {
+    fn from((result, degradation): (FindCallPathResult, Option<Degradation>)) -> Self {
+        FindCallPathOutput {
+            result,
+            degrade: degradation.map(DegradeInfo::from),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -538,6 +590,60 @@ mod tests {
         let v = serde_json::to_value(&output).unwrap();
         assert_eq!(v.get("degrade_reason").unwrap(), "lsp_timeout");
         assert_eq!(v.get("lsp_status").unwrap(), "degraded");
+    }
+
+    #[test]
+    fn find_call_path_input_defaults_depth_and_budget_when_omitted() {
+        let input = FindCallPathInput {
+            from: SymbolRefInput {
+                fqn: Some("repo.a".into()),
+                at: None,
+            },
+            to: SymbolRefInput {
+                fqn: Some("repo.b".into()),
+                at: None,
+            },
+            max_depth: None,
+            max_lsp_calls: None,
+        };
+        let (from, to, max_depth, max_lsp_calls) = input.into_parts().unwrap();
+        assert_eq!(from, SymbolRef::Fqn("repo.a".into()));
+        assert_eq!(to, SymbolRef::Fqn("repo.b".into()));
+        assert_eq!(max_depth, DEFAULT_CALL_PATH_MAX_DEPTH);
+        assert_eq!(max_lsp_calls, DEFAULT_CALL_PATH_LSP_BUDGET);
+    }
+
+    #[test]
+    fn find_call_path_input_clamps_out_of_range_depth_and_budget() {
+        let input = FindCallPathInput {
+            from: SymbolRefInput {
+                fqn: Some("repo.a".into()),
+                at: None,
+            },
+            to: SymbolRefInput {
+                fqn: Some("repo.b".into()),
+                at: None,
+            },
+            max_depth: Some(0),
+            max_lsp_calls: Some(u32::MAX),
+        };
+        let (_, _, max_depth, max_lsp_calls) = input.into_parts().unwrap();
+        assert_eq!(max_depth, 1, "0 hops would forbid even a trivial search");
+        assert_eq!(max_lsp_calls, MAX_CALL_PATH_LSP_BUDGET);
+    }
+
+    #[test]
+    fn find_call_path_input_rejects_missing_endpoint() {
+        let input = FindCallPathInput {
+            from: SymbolRefInput::default(),
+            to: SymbolRefInput {
+                fqn: Some("repo.b".into()),
+                at: None,
+            },
+            max_depth: None,
+            max_lsp_calls: None,
+        };
+        assert!(input.into_parts().is_err());
     }
 
     #[test]

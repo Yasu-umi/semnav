@@ -13,7 +13,7 @@ Before this change, `semnav serve <root>` was a single process spawned by the MC
 ## Process split
 
 * **`semnav daemon <root>`**: owns the real state — `DbActor`, `QueryEngine`, `QueryRuntime` (LSP supervisors), `FsWatcher`, `SemnavServer`. Lives until idle-timeout, an explicit `daemon stop`, or a signal. Exactly one daemon runs per `<root>` at a time.
-* **`semnav serve <root>`**: the process the MCP client actually spawns over stdio — unchanged from the client's point of view. Holds **no domain state** — no `DbActor`, no `QueryRuntime`, no LSP supervisor. On startup it ensures a daemon is running (auto-spawning one if needed), then proxies all 7 tools to it over `DaemonClient`. `serve` exiting (gracefully or via `kill -9`) has **zero effect** on the daemon or its LSP children — that inversion of the old "MCP process owns everything" model is the entire point.
+* **`semnav serve <root>`**: the process the MCP client actually spawns over stdio — unchanged from the client's point of view. Holds **no domain state** — no `DbActor`, no `QueryRuntime`, no LSP supervisor. On startup it ensures a daemon is running (auto-spawning one if needed), then proxies all 8 tools to it over `DaemonClient`. `serve` exiting (gracefully or via `kill -9`) has **zero effect** on the daemon or its LSP children — that inversion of the old "MCP process owns everything" model is the entire point.
 
 ## File layout
 

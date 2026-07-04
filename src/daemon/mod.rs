@@ -1,5 +1,5 @@
 //! Persistent per-root daemon behind `semnav serve`'s stdio contract
-//! (`docs/design/daemon-lifecycle.md`). `serve` proxies all 7 tools to a
+//! (`docs/design/daemon-lifecycle.md`). `serve` proxies all 8 tools to a
 //! long-lived `semnav daemon <root>` process so LSP servers' background
 //! analysis stays warm across many short-lived client connections — pyright
 //! itself has no cross-process cache, so every fresh process re-scans the

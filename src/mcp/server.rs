@@ -1,4 +1,4 @@
-//! The rmcp server boundary: 6 tools over one [`QueryRuntime`]. Holds no
+//! The rmcp server boundary: 8 tools over one [`QueryRuntime`]. Holds no
 //! domain logic (`docs/design/crate-structure.md` Decision Point 5) — every tool
 //! destructures its input DTO, calls straight into `runtime`, and reshapes
 //! the result via `super::dto`.
@@ -12,9 +12,9 @@ use rmcp::{ErrorData, Json, ServerHandler, tool, tool_handler, tool_router};
 use crate::query::{FindSymbolResult, QueryRuntime, ReadRangeResult, SymbolRef};
 
 use super::dto::{
-    CallGraphQueryInput, FindCalleesOutput, FindCallersOutput, FindDefinitionInput,
-    FindDefinitionOutput, FindReferencesOutput, FindSymbolInput, ReadRangeInput, RestartLspInput,
-    RestartLspResult, SymbolQueryInput,
+    CallGraphQueryInput, FindCallPathInput, FindCallPathOutput, FindCalleesOutput,
+    FindCallersOutput, FindDefinitionInput, FindDefinitionOutput, FindReferencesOutput,
+    FindSymbolInput, ReadRangeInput, RestartLspInput, RestartLspResult, SymbolQueryInput,
 };
 
 /// The MCP server, exposing `QueryRuntime`'s 6 operations as tools.
@@ -124,6 +124,23 @@ impl SemnavServer {
     }
 
     #[tool(
+        name = "find_call_path",
+        description = "Check whether `from` reaches `to` through zero or more `calls` hops (BFS), returning one example path when found. Prefer this over manually chaining find_callees hop-by-hop to answer 'does A call B, even transitively?' across layers. Bounded by max_depth hops and max_lsp_calls live call-hierarchy round trips; when the search is cut short before proving `to` unreachable, the response's limit_reached is true and a reachable:false result must be read as inconclusive, not as a proof that `from` never calls `to`."
+    )]
+    pub async fn find_call_path(
+        &self,
+        Parameters(input): Parameters<FindCallPathInput>,
+    ) -> Result<Json<FindCallPathOutput>, ErrorData> {
+        let (from, to, max_depth, max_lsp_calls) = input.into_parts()?;
+        let result = self
+            .runtime
+            .find_call_path(&from, &to, max_depth, max_lsp_calls)
+            .await
+            .map_err(internal_error)?;
+        Ok(Json(result.into()))
+    }
+
+    #[tool(
         name = "read_range",
         description = "Read a source slice directly from disk by line range. Pair with the ranges returned by find_* (which never include body text) instead of re-reading whole files."
     )]
@@ -222,6 +239,30 @@ mod tests {
             .await
             .expect("degrades to empty, not an error");
         assert!(output.result.references.is_empty());
+        assert!(output.degrade.is_none());
+    }
+
+    #[tokio::test]
+    async fn find_call_path_for_unresolvable_endpoints_is_not_degraded() {
+        let server = test_server();
+        let input = FindCallPathInput {
+            from: super::super::dto::SymbolRefInput {
+                fqn: Some("repo.nope_a".into()),
+                at: None,
+            },
+            to: super::super::dto::SymbolRefInput {
+                fqn: Some("repo.nope_b".into()),
+                at: None,
+            },
+            max_depth: None,
+            max_lsp_calls: None,
+        };
+        let Json(output) = server
+            .find_call_path(Parameters(input))
+            .await
+            .expect("degrades to a proven negative, not an error");
+        assert!(!output.result.reachable);
+        assert!(!output.result.limit_reached);
         assert!(output.degrade.is_none());
     }
 

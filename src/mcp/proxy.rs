@@ -1,4 +1,4 @@
-//! `serve`'s stdio-facing rmcp server: the same 7 tools as [`SemnavServer`],
+//! `serve`'s stdio-facing rmcp server: the same 8 tools as [`SemnavServer`],
 //! but each one forwards to a background `daemon` over [`DaemonClient`]
 //! instead of touching a [`QueryRuntime`] directly. Holds no domain state —
 //! not `DbActor`, not `QueryRuntime`, not an LSP supervisor — matching this
@@ -16,12 +16,12 @@ use crate::daemon::protocol::DaemonRequest;
 use crate::query::{FindSymbolResult, ReadRangeResult};
 
 use super::dto::{
-    CallGraphQueryInput, FindCalleesOutput, FindCallersOutput, FindDefinitionInput,
-    FindDefinitionOutput, FindReferencesOutput, FindSymbolInput, ReadRangeInput, RestartLspInput,
-    RestartLspResult, SymbolQueryInput,
+    CallGraphQueryInput, FindCallPathInput, FindCallPathOutput, FindCalleesOutput,
+    FindCallersOutput, FindDefinitionInput, FindDefinitionOutput, FindReferencesOutput,
+    FindSymbolInput, ReadRangeInput, RestartLspInput, RestartLspResult, SymbolQueryInput,
 };
 
-/// The proxy MCP server, exposing the same 7 tools as [`SemnavServer`] by
+/// The proxy MCP server, exposing the same 8 tools as [`SemnavServer`] by
 /// forwarding every call through [`DaemonClient`].
 #[derive(Clone)]
 pub struct ProxyServer {
@@ -109,6 +109,17 @@ impl ProxyServer {
         Parameters(input): Parameters<CallGraphQueryInput>,
     ) -> Result<Json<FindCalleesOutput>, ErrorData> {
         Ok(Json(self.call(DaemonRequest::FindCallees(input)).await?))
+    }
+
+    #[tool(
+        name = "find_call_path",
+        description = "Check reachability from one symbol to another over calls hops (docs/design/mcp-tools.md)."
+    )]
+    pub async fn find_call_path(
+        &self,
+        Parameters(input): Parameters<FindCallPathInput>,
+    ) -> Result<Json<FindCallPathOutput>, ErrorData> {
+        Ok(Json(self.call(DaemonRequest::FindCallPath(input)).await?))
     }
 
     #[tool(

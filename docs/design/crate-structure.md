@@ -6,7 +6,7 @@
 
 * Implementation language: **Rust**, distributed as a **single binary**
 * Dependency crates (finalized):
-  * `rmcp` — MCP server SDK (exposes 7 tools: 6 query + `restart_lsp`)
+  * `rmcp` — MCP server SDK (exposes 8 tools: 7 query + `restart_lsp`)
   * `rusqlite` (+ bundled SQLite, WAL) — persistent cache
   * `refinery` — migration runner (`embed_migrations!`, manages `migrations/*.sql`). Decision Point 3
   * `notify` — FS watcher (invalidation)
@@ -41,13 +41,13 @@ Breakdown of each design doc's expected responsibility into the implementation m
 
 | Module | Responsibility | Basis doc |
 |---|---|---|
-| `mcp` | rmcp server: `SemnavServer` (daemon-side, calls `query` directly) and `ProxyServer` (serve-side, forwards to `daemon` over `DaemonClient`) — same 6 query tools (`find_symbol`/`definition`/`references`/`callers`/`callees`/`read_range`) plus the `restart_lsp` maintenance tool, DTOs, pagination cursor, degraded responses | [mcp-tools.md](./mcp-tools.md) / [resilience.md](./resilience.md) |
+| `mcp` | rmcp server: `SemnavServer` (daemon-side, calls `query` directly) and `ProxyServer` (serve-side, forwards to `daemon` over `DaemonClient`) — same 7 query tools (`find_symbol`/`definition`/`references`/`callers`/`callees`/`call_path`/`read_range`) plus the `restart_lsp` maintenance tool, DTOs, pagination cursor, degraded responses | [mcp-tools.md](./mcp-tools.md) / [resilience.md](./resilience.md) |
 | `graph` | SQLite (nodes/edges/events/index_meta) CRUD, `valid`/`orphan`/`generation`, FQN construction, `is_external` determination, refinery migration, **db actor** (sole ownership of the Connection) | [graph-model.md](./graph-model.md) |
 | `lsp` | Child process management (spawn/exit monitoring), health state machine, backoff, timeouts, **thin homegrown JSON-RPC** (Content-Length framing + id pairing), `workspaceFolders`/didOpen/didChange, health (`index_meta` KV) | [lsp-lifecycle.md](./lsp-lifecycle.md) |
 | `adapters` | `LanguageAdapter` trait, pyright/tsserver implementations, provisioning (isolated npm install), `map_symbol_kind`/`NodeKind`, hover refinement (`construct` extraction) | [language-adapters.md](./language-adapters.md) |
 | `indexer` | File discovery (`ignore`), serial documentSymbol collection, FS watcher (`notify`), invalidation flow, orphan reclamation | [indexing-and-cache.md](./indexing-and-cache.md) |
 | `query` | On-demand edge construction (definition/references/callHierarchy/typeDefinition/implementation), `SymbolRef` resolution (fqn\|at), Filter, `read_range` (direct FS read) | [mcp-tools.md](./mcp-tools.md) / [indexing-and-cache.md](./indexing-and-cache.md) |
-| `daemon` | `serve`↔`daemon` Unix-socket protocol (NDJSON envelopes over the 7 ops), discovery/liveness probe, spawn-race lock (`flock`), the daemon's own accept loop + idle-timeout self-shutdown | [daemon-lifecycle.md](./daemon-lifecycle.md) |
+| `daemon` | `serve`↔`daemon` Unix-socket protocol (NDJSON envelopes over the 8 ops), discovery/liveness probe, spawn-race lock (`flock`), the daemon's own accept loop + idle-timeout self-shutdown | [daemon-lifecycle.md](./daemon-lifecycle.md) |
 | `bin` / `cli` | Entry point, `discover`/`index`/`serve`/`daemon`/`daemon stop` CLI, `SEMNAV_CACHE_DIR`/`.semnav` resolution, provisioning guidance messages, `shutdown` (SIGTERM/SIGKILL) | [language-adapters.md](./language-adapters.md) Distribution / [lsp-lifecycle.md](./lsp-lifecycle.md) Shutdown / [daemon-lifecycle.md](./daemon-lifecycle.md) |
 
 > `mcp` (rmcp boundary, DTO shaping) calls `query` (Graph↔LSP orchestration) on the daemon side, or `daemon::client::DaemonClient` on the serve side. The `mcp`/`query` boundary was finalized as separate in Decision Point 5; the `serve`/`daemon` process split is Decision Point 6.

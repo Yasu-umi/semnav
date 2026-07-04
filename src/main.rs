@@ -45,7 +45,7 @@ fn print_help() {
     eprintln!(
         "                            rust-analyzer must already be on PATH, e.g. via rustup)"
     );
-    eprintln!("  semnav serve <root>      serve the 7 MCP tools over stdio, proxied to a");
+    eprintln!("  semnav serve <root>      serve the 8 MCP tools over stdio, proxied to a");
     eprintln!("                           background daemon (auto-started; run `index` first)");
     eprintln!(
         "  semnav daemon <root>     run the persistent daemon directly (usually auto-started by `serve`)"
@@ -161,7 +161,7 @@ fn serve(args: &[String]) -> ExitCode {
     runtime.block_on(run_serve(&root))
 }
 
-/// Serve the 7 MCP tools over stdio, proxied to a persistent background
+/// Serve the 8 MCP tools over stdio, proxied to a persistent background
 /// `daemon` (`docs/design/daemon-lifecycle.md`). `serve` holds none of the
 /// domain state itself — no `DbActor`, no `QueryRuntime`, no LSP supervisor —
 /// it auto-starts the daemon if one isn't already running for `root`, then

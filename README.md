@@ -71,7 +71,7 @@ semnav serve /path/to/your/project
 
 ## MCP tools
 
-`serve` exposes 7 tools: 6 query tools (`find_symbol`, `find_definition`, `find_references`, `find_callers`, `find_callees`, `read_range`) plus a `restart_lsp` maintenance tool for forcing a wedged language server to restart. Full input/output schemas are documented in [docs/design/mcp-tools.md](docs/design/mcp-tools.md).
+`serve` exposes 8 tools: 7 query tools (`find_symbol`, `find_definition`, `find_references`, `find_callers`, `find_callees`, `find_call_path`, `read_range`) plus a `restart_lsp` maintenance tool for forcing a wedged language server to restart. Full input/output schemas are documented in [docs/design/mcp-tools.md](docs/design/mcp-tools.md).
 
 ## Documentation
 

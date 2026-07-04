@@ -37,8 +37,8 @@ use crate::lsp::{
 use super::dto::{CallGraphNode, NodeDto};
 use super::lsp_query::{ClientLspQueryClient, LspQueryClient};
 use super::{
-    CallGraphResult, Filter, FindDefinitionResult, FindReferencesResult, FindSymbolOptions,
-    FindSymbolResult, MatchMode, Page, QueryEngine, ReadRangeResult, SymbolRef,
+    CallGraphResult, Filter, FindCallPathResult, FindDefinitionResult, FindReferencesResult,
+    FindSymbolOptions, FindSymbolResult, MatchMode, Page, QueryEngine, ReadRangeResult, SymbolRef,
 };
 
 /// Why an LSP-dependent operation fell back to cache-only (or partially
@@ -191,7 +191,7 @@ impl QueryRuntime {
         }
     }
 
-    // --- the six operations --------------------------------------------------
+    // --- the seven operations --------------------------------------------------
 
     /// `find_symbol` — a pure graph read (no LSP) unless `options.with_signature`
     /// opts into a hover backfill pass afterward (below).
@@ -460,6 +460,33 @@ impl QueryRuntime {
             )
             .await;
         }
+        Ok((result, degradation.or(timeout_degradation(timed_out))))
+    }
+
+    /// `find_call_path` — BFS reachability from `from` to `to` over outgoing
+    /// `calls` edges (`docs/design/mcp-tools.md`). The `calls` graph never
+    /// crosses a language boundary (call hierarchy is per-server), so one
+    /// client — acquired for `from`'s language, exactly like
+    /// `find_callers`/`find_callees` — is enough for the whole BFS. `None`
+    /// (an unavailable server) degrades to a cache-only search rather than
+    /// erroring; the engine's `limit_reached` flag then covers for the
+    /// missing client.
+    pub async fn find_call_path(
+        &self,
+        from: &SymbolRef,
+        to: &SymbolRef,
+        max_depth: u32,
+        max_lsp_calls: u32,
+    ) -> Result<(FindCallPathResult, Option<Degradation>)> {
+        let _guard = self.enter_query();
+        let (client, degradation) = self.client_for(from).await?;
+        let wrapper = client
+            .as_ref()
+            .map(|c| ClientLspQueryClient::with_default_timeout(&c.client, c.language_id()));
+        let (result, timed_out) = self
+            .engine
+            .find_call_path(from, to, max_depth, max_lsp_calls, wrapper.as_ref())
+            .await?;
         Ok((result, degradation.or(timeout_degradation(timed_out))))
     }
 

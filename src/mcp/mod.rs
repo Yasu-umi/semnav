@@ -1,5 +1,5 @@
-//! MCP server boundary — rmcp server, the 6 tools
-//! (`find_symbol`/`definition`/`references`/`callers`/`callees`/`read_range`),
+//! MCP server boundary — rmcp server, the 8 tools
+//! (`find_symbol`/`definition`/`references`/`callers`/`callees`/`call_path`/`read_range`/`restart_lsp`),
 //! DTO shaping, cursor pagination, and degraded responses.
 //!
 //! `mcp` calls `query`; it holds no domain logic. See `docs/design/mcp-tools.md`

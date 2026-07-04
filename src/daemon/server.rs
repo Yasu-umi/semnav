@@ -194,6 +194,9 @@ async fn dispatch(
         DaemonRequest::FindCallees(input) => {
             to_result(semnav_server.find_callees(Parameters(input)).await)
         }
+        DaemonRequest::FindCallPath(input) => {
+            to_result(semnav_server.find_call_path(Parameters(input)).await)
+        }
         DaemonRequest::ReadRange(input) => {
             to_result(semnav_server.read_range(Parameters(input)).await)
         }

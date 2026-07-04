@@ -178,6 +178,24 @@ pub struct CallGraphResult {
     pub next_cursor: Option<String>,
 }
 
+/// `find_call_path` → BFS reachability from one symbol to another over
+/// outgoing `calls` edges (`docs/design/mcp-tools.md` "find_call_path").
+/// `path` is the sequence of nodes from `from` to `to` inclusive (empty when
+/// `reachable` is `false`).
+///
+/// `limit_reached` is the field that keeps a `false` `reachable` honest: it's
+/// `true` whenever the search stopped — depth cap, LSP-call budget, or no
+/// client available at all — *before* it could prove `to` unreachable. A
+/// caller must treat `{reachable: false, limit_reached: true}` as "not found
+/// within these limits," not as a proven negative; only `{reachable: false,
+/// limit_reached: false}` means the search was exhaustive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FindCallPathResult {
+    pub reachable: bool,
+    pub path: Vec<NodeDto>,
+    pub limit_reached: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
