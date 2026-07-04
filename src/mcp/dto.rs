@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::query::{
     CallGraphNode, CallGraphResult, Degradation, DegradeReason, Filter, FindDefinitionResult,
-    FindReferencesResult, LspStatus, MAX_PAGE_LIMIT, MatchMode, Page, SymbolRef,
+    FindReferencesResult, FindSymbolOptions, LspStatus, MAX_PAGE_LIMIT, MatchMode, Page, SymbolRef,
 };
 
 /// An occurrence position (`docs/design/mcp-tools.md` SymbolRef `at`).
@@ -130,6 +130,12 @@ pub struct FindSymbolInput {
     /// metadata on a wide result set.
     #[serde(default)]
     pub brief: bool,
+    /// Best-effort hover-derived `signature` backfill for each returned node
+    /// that doesn't already have one — costs one extra LSP `hover` round trip
+    /// per such node, so it's opt-in rather than the default
+    /// (`docs/design/mcp-tools.md`). No-op when `brief` is set.
+    #[serde(default)]
+    pub with_signature: bool,
     #[serde(flatten)]
     pub filter: FilterInput,
     #[serde(flatten)]
@@ -137,13 +143,19 @@ pub struct FindSymbolInput {
 }
 
 impl FindSymbolInput {
-    pub fn into_parts(self) -> Result<(String, MatchMode, bool, bool, Filter, Page), ErrorData> {
+    pub fn into_parts(
+        self,
+    ) -> Result<(String, MatchMode, bool, FindSymbolOptions, Filter, Page), ErrorData> {
         let page = self.page.into_page()?;
+        let options = FindSymbolOptions {
+            brief: self.brief,
+            with_signature: self.with_signature,
+        };
         Ok((
             self.pattern,
             self.match_mode,
             self.ignore_case,
-            self.brief,
+            options,
             self.filter.into(),
             page,
         ))
@@ -166,6 +178,28 @@ impl SymbolQueryInput {
     pub fn into_parts(self) -> Result<(SymbolRef, Filter, Page), ErrorData> {
         let page = self.page.into_page()?;
         Ok((self.symbol.try_into()?, self.filter.into(), page))
+    }
+}
+
+/// `find_callers`/`find_callees` request: [`SymbolQueryInput`] plus the
+/// `with_signature` opt-in (`docs/design/mcp-tools.md`). A separate type
+/// rather than a field on `SymbolQueryInput` itself, so `find_references`
+/// (which shares that struct) doesn't advertise a flag it doesn't implement.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CallGraphQueryInput {
+    #[serde(flatten)]
+    pub query: SymbolQueryInput,
+    /// Best-effort hover-derived `signature` backfill for each returned
+    /// node that doesn't already have one — costs one extra LSP `hover`
+    /// round trip per such node, so it's opt-in rather than the default.
+    #[serde(default)]
+    pub with_signature: bool,
+}
+
+impl CallGraphQueryInput {
+    pub fn into_parts(self) -> Result<(SymbolRef, Filter, Page, bool), ErrorData> {
+        let (symref, filter, page) = self.query.into_parts()?;
+        Ok((symref, filter, page, self.with_signature))
     }
 }
 

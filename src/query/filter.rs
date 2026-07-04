@@ -42,6 +42,18 @@ impl MatchMode {
     }
 }
 
+/// `find_symbol`'s two response-shaping toggles, grouped into one parameter
+/// to keep `QueryRuntime::find_symbol`'s signature under clippy's
+/// argument-count lint. `brief` swaps `nodes` for `fqns`; `with_signature`
+/// opts into a hover backfill pass on each returned node still missing a
+/// `signature` (`docs/design/mcp-tools.md` "Populating `signature`") — a
+/// no-op when `brief` is set, since there are no `Node`s to enrich.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FindSymbolOptions {
+    pub brief: bool,
+    pub with_signature: bool,
+}
+
 fn eq(a: &str, b: &str, ignore_case: bool) -> bool {
     if ignore_case {
         a.eq_ignore_ascii_case(b)

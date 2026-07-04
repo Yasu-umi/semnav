@@ -131,19 +131,37 @@ impl QueryEngine {
                         )
                         .await?
                     {
-                        if node.construct.is_none()
+                        if (node.construct.is_none() || node.signature.is_none())
                             && let Some(id) = node.id
-                            && let Ok(Some(hover)) = client
+                        {
+                            // `node.uri` is the resolved *target* file, which
+                            // may differ from `uri` (the usage site already
+                            // opened above) for a cross-file definition —
+                            // pyright/tsserver answer `hover` from live
+                            // in-memory state, not a background scan, so an
+                            // unopened target silently yields a null hover.
+                            self.ensure_open(&node.uri, client).await;
+                            if let Ok(Some(hover)) = client
                                 .hover(
                                     &node.uri,
                                     node.sel.start_line as u32,
                                     node.sel.start_col as u32,
                                 )
                                 .await
-                            && let Some(construct) = NodeKind::construct_from_hover(&hover.value)
-                        {
-                            let _ = self.db.update_node_construct(id, &construct).await;
-                            node.construct = Some(construct);
+                            {
+                                if node.construct.is_none()
+                                    && let Some(construct) =
+                                        NodeKind::construct_from_hover(&hover.value)
+                                {
+                                    let _ = self.db.update_node_construct(id, &construct).await;
+                                    node.construct = Some(construct);
+                                }
+                                let signature = hover.value.trim();
+                                if node.signature.is_none() && !signature.is_empty() {
+                                    let _ = self.db.update_node_signature(id, signature).await;
+                                    node.signature = Some(signature.to_string());
+                                }
+                            }
                         }
                         nodes.push(NodeDto::from_node(&node));
                     }
@@ -760,7 +778,49 @@ mod tests {
         assert_eq!(res.nodes.len(), 1);
         assert_eq!(res.nodes[0].fqn, "repo.alias");
         assert_eq!(res.nodes[0].kind_label, "TypeAlias");
+        assert_eq!(
+            res.nodes[0].signature.as_deref(),
+            Some("```typescript\ntype Alias = string\n```"),
+            "the same hover round trip that refines construct also backfills signature"
+        );
         assert!(!timed_out);
+    }
+
+    #[tokio::test]
+    async fn find_definition_at_persists_signature_to_the_db() {
+        let (engine, mut mock) = scenario().await;
+        mock.hovers.insert(
+            (URI.to_string(), 0, 4),
+            Some(Hover {
+                value: "def helper() -> int".to_string(),
+            }),
+        );
+
+        let (res, _) = engine
+            .find_definition(
+                &SymbolRef::At {
+                    uri: URI.into(),
+                    line: 7,
+                    character: 4,
+                },
+                Some(&mock),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            res.nodes[0].signature.as_deref(),
+            Some("def helper() -> int")
+        );
+
+        // Persisted, not just attached to this response: a later cache-only
+        // lookup (no client, no hover) sees it too.
+        let stored = engine
+            .db()
+            .get_node_by_fqn("repo.helper")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.signature.as_deref(), Some("def helper() -> int"));
     }
 
     #[tokio::test]

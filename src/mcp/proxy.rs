@@ -16,9 +16,9 @@ use crate::daemon::protocol::DaemonRequest;
 use crate::query::{FindSymbolResult, ReadRangeResult};
 
 use super::dto::{
-    FindCalleesOutput, FindCallersOutput, FindDefinitionInput, FindDefinitionOutput,
-    FindReferencesOutput, FindSymbolInput, ReadRangeInput, RestartLspInput, RestartLspResult,
-    SymbolQueryInput,
+    CallGraphQueryInput, FindCalleesOutput, FindCallersOutput, FindDefinitionInput,
+    FindDefinitionOutput, FindReferencesOutput, FindSymbolInput, ReadRangeInput, RestartLspInput,
+    RestartLspResult, SymbolQueryInput,
 };
 
 /// The proxy MCP server, exposing the same 7 tools as [`SemnavServer`] by
@@ -95,7 +95,7 @@ impl ProxyServer {
     )]
     pub async fn find_callers(
         &self,
-        Parameters(input): Parameters<SymbolQueryInput>,
+        Parameters(input): Parameters<CallGraphQueryInput>,
     ) -> Result<Json<FindCallersOutput>, ErrorData> {
         Ok(Json(self.call(DaemonRequest::FindCallers(input)).await?))
     }
@@ -106,7 +106,7 @@ impl ProxyServer {
     )]
     pub async fn find_callees(
         &self,
-        Parameters(input): Parameters<SymbolQueryInput>,
+        Parameters(input): Parameters<CallGraphQueryInput>,
     ) -> Result<Json<FindCalleesOutput>, ErrorData> {
         Ok(Json(self.call(DaemonRequest::FindCallees(input)).await?))
     }
@@ -187,6 +187,7 @@ mod tests {
             match_mode: Default::default(),
             ignore_case: false,
             brief: false,
+            with_signature: false,
             filter: Default::default(),
             page: Default::default(),
         };

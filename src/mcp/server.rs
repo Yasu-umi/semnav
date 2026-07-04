@@ -12,9 +12,9 @@ use rmcp::{ErrorData, Json, ServerHandler, tool, tool_handler, tool_router};
 use crate::query::{FindSymbolResult, QueryRuntime, ReadRangeResult, SymbolRef};
 
 use super::dto::{
-    FindCalleesOutput, FindCallersOutput, FindDefinitionInput, FindDefinitionOutput,
-    FindReferencesOutput, FindSymbolInput, ReadRangeInput, RestartLspInput, RestartLspResult,
-    SymbolQueryInput,
+    CallGraphQueryInput, FindCalleesOutput, FindCallersOutput, FindDefinitionInput,
+    FindDefinitionOutput, FindReferencesOutput, FindSymbolInput, ReadRangeInput, RestartLspInput,
+    RestartLspResult, SymbolQueryInput,
 };
 
 /// The MCP server, exposing `QueryRuntime`'s 6 operations as tools.
@@ -46,10 +46,10 @@ impl SemnavServer {
         &self,
         Parameters(input): Parameters<FindSymbolInput>,
     ) -> Result<Json<FindSymbolResult>, ErrorData> {
-        let (pattern, mode, ignore_case, brief, filter, page) = input.into_parts()?;
+        let (pattern, mode, ignore_case, options, filter, page) = input.into_parts()?;
         let result = self
             .runtime
-            .find_symbol(&pattern, mode, ignore_case, brief, &filter, &page)
+            .find_symbol(&pattern, mode, ignore_case, options, &filter, &page)
             .await
             .map_err(internal_error)?;
         Ok(Json(result))
@@ -95,12 +95,12 @@ impl SemnavServer {
     )]
     pub async fn find_callers(
         &self,
-        Parameters(input): Parameters<SymbolQueryInput>,
+        Parameters(input): Parameters<CallGraphQueryInput>,
     ) -> Result<Json<FindCallersOutput>, ErrorData> {
-        let (symref, filter, page) = input.into_parts()?;
+        let (symref, filter, page, with_signature) = input.into_parts()?;
         let result = self
             .runtime
-            .find_callers(&symref, &filter, &page)
+            .find_callers(&symref, &filter, &page, with_signature)
             .await
             .map_err(internal_error)?;
         Ok(Json(result.into()))
@@ -112,12 +112,12 @@ impl SemnavServer {
     )]
     pub async fn find_callees(
         &self,
-        Parameters(input): Parameters<SymbolQueryInput>,
+        Parameters(input): Parameters<CallGraphQueryInput>,
     ) -> Result<Json<FindCalleesOutput>, ErrorData> {
-        let (symref, filter, page) = input.into_parts()?;
+        let (symref, filter, page, with_signature) = input.into_parts()?;
         let result = self
             .runtime
-            .find_callees(&symref, &filter, &page)
+            .find_callees(&symref, &filter, &page, with_signature)
             .await
             .map_err(internal_error)?;
         Ok(Json(result.into()))
@@ -194,6 +194,7 @@ mod tests {
             match_mode: MatchMode::Segment,
             ignore_case: false,
             brief: false,
+            with_signature: false,
             filter: Default::default(),
             page: Default::default(),
         };

@@ -34,10 +34,11 @@ use crate::lsp::{
     AcquireError, LspClient, RealServerFactory, RestartPolicy, ServerSupervisor, SupervisorHandle,
 };
 
-use super::lsp_query::ClientLspQueryClient;
+use super::dto::{CallGraphNode, NodeDto};
+use super::lsp_query::{ClientLspQueryClient, LspQueryClient};
 use super::{
-    CallGraphResult, Filter, FindDefinitionResult, FindReferencesResult, FindSymbolResult,
-    MatchMode, Page, QueryEngine, ReadRangeResult, SymbolRef,
+    CallGraphResult, Filter, FindDefinitionResult, FindReferencesResult, FindSymbolOptions,
+    FindSymbolResult, MatchMode, Page, QueryEngine, ReadRangeResult, SymbolRef,
 };
 
 /// Why an LSP-dependent operation fell back to cache-only (or partially
@@ -192,19 +193,26 @@ impl QueryRuntime {
 
     // --- the six operations --------------------------------------------------
 
-    /// `find_symbol` — a pure graph read (no LSP); delegates straight through.
+    /// `find_symbol` — a pure graph read (no LSP) unless `options.with_signature`
+    /// opts into a hover backfill pass afterward (below).
     pub async fn find_symbol(
         &self,
         pattern: &str,
         mode: MatchMode,
         ignore_case: bool,
-        brief: bool,
+        options: FindSymbolOptions,
         filter: &Filter,
         page: &Page,
     ) -> Result<FindSymbolResult> {
-        self.engine
-            .find_symbol(pattern, mode, ignore_case, brief, filter, page)
-            .await
+        let mut result = self
+            .engine
+            .find_symbol(pattern, mode, ignore_case, options.brief, filter, page)
+            .await?;
+        if options.with_signature {
+            self.backfill_signatures_by_language(&mut result.nodes)
+                .await;
+        }
+        Ok(result)
     }
 
     /// `read_range` — a pure filesystem read (no LSP); delegates straight through.
@@ -333,11 +341,14 @@ impl QueryRuntime {
 
     /// `find_callers` — cache-first + background refresh; see
     /// [`Self::find_references`] for the warm/cold/refresh contract.
+    /// `with_signature` backfills each returned node's `signature` via the
+    /// same client, best effort (`docs/design/mcp-tools.md`).
     pub async fn find_callers(
         &self,
         symref: &SymbolRef,
         filter: &Filter,
         page: &Page,
+        with_signature: bool,
     ) -> Result<(CallGraphResult, Option<Degradation>, bool)> {
         let _guard = self.enter_query();
         let (client, degradation) = self.client_for(symref).await?;
@@ -379,10 +390,17 @@ impl QueryRuntime {
                 .db()
                 .mark_materialized(anchor_id, "calls")
                 .await?;
-            let result = self
+            let mut result = self
                 .engine
                 .callers_from_cache(anchor_id, filter, page)
                 .await?;
+            if with_signature {
+                self.backfill_signatures(
+                    result.items.iter_mut().map(call_graph_node_signature_mut),
+                    &client,
+                )
+                .await;
+            }
             return Ok((
                 result,
                 degradation.or(timeout_degradation(timed_out || materialize_timed_out)),
@@ -390,10 +408,17 @@ impl QueryRuntime {
             ));
         }
 
-        let result = self
+        let mut result = self
             .engine
             .callers_from_cache(anchor_id, filter, page)
             .await?;
+        if with_signature {
+            self.backfill_signatures(
+                result.items.iter_mut().map(call_graph_node_signature_mut),
+                &client,
+            )
+            .await;
+        }
         let refreshing = self.spawn_refresh(
             anchor_id,
             "calls",
@@ -409,22 +434,32 @@ impl QueryRuntime {
     }
 
     /// `find_callees` — on-demand outgoing call hierarchy when the anchor's
-    /// language server is up, else the cached `calls` edges.
+    /// language server is up, else the cached `calls` edges. `with_signature`
+    /// backfills each returned node's `signature` via the same client, best
+    /// effort (`docs/design/mcp-tools.md`).
     pub async fn find_callees(
         &self,
         symref: &SymbolRef,
         filter: &Filter,
         page: &Page,
+        with_signature: bool,
     ) -> Result<(CallGraphResult, Option<Degradation>)> {
         let _guard = self.enter_query();
         let (client, degradation) = self.client_for(symref).await?;
         let wrapper = client
             .as_ref()
             .map(|c| ClientLspQueryClient::with_default_timeout(&c.client, c.language_id()));
-        let (result, timed_out) = self
+        let (mut result, timed_out) = self
             .engine
             .find_callees(symref, filter, page, wrapper.as_ref())
             .await?;
+        if with_signature && let Some(client) = client.as_ref() {
+            self.backfill_signatures(
+                result.items.iter_mut().map(call_graph_node_signature_mut),
+                client,
+            )
+            .await;
+        }
         Ok((result, degradation.or(timeout_degradation(timed_out))))
     }
 
@@ -534,6 +569,75 @@ impl QueryRuntime {
         self.acquire_opt(Some(language)).await.ok().flatten()
     }
 
+    /// Best-effort hover-derived `signature` backfill for `nodes` still
+    /// missing one — the `with_signature=true` opt-in on `find_symbol`/
+    /// `find_callers`/`find_callees` (`docs/design/mcp-tools.md`). Skips a
+    /// node whose `language` doesn't match `client`'s: call/reference-graph
+    /// results are expected to stay within one language server, and this
+    /// pass isn't worth spinning up a second one for. Hover failures are
+    /// swallowed — this enrichment is additive and must never turn an
+    /// otherwise-successful page into an error (mirrors `find_definition`'s
+    /// construct-refinement hover, `docs/design/lsp-integration.md`).
+    async fn backfill_signatures<'a>(
+        &self,
+        nodes: impl IntoIterator<Item = &'a mut NodeDto>,
+        client: &AcquiredClient,
+    ) {
+        let wrapper =
+            ClientLspQueryClient::with_default_timeout(&client.client, client.language_id());
+        let mut opened: HashSet<String> = HashSet::new();
+        for node in nodes {
+            if node.signature.is_some() || node.language != client.language_id() {
+                continue;
+            }
+            if opened.insert(node.uri.clone()) {
+                self.engine.ensure_open(&node.uri, &wrapper).await;
+            }
+            if let Ok(Some(hover)) = wrapper
+                .hover(
+                    &node.uri,
+                    node.selection_range.start.line,
+                    node.selection_range.start.character,
+                )
+                .await
+            {
+                let signature = hover.value.trim();
+                if !signature.is_empty() {
+                    let _ = self
+                        .engine
+                        .db()
+                        .update_node_signature_by_fqn(&node.fqn, signature)
+                        .await;
+                    node.signature = Some(signature.to_string());
+                }
+            }
+        }
+    }
+
+    /// `find_symbol`'s `with_signature` opt-in has no single pinned anchor
+    /// language (unlike `find_callers`/`find_callees`, scoped to one
+    /// anchor) — a pattern match can span every indexed language at once.
+    /// Groups nodes still missing a signature by `language` and acquires one
+    /// client per distinct language present; a language whose server can't
+    /// be acquired is simply left unenriched (`find_symbol` has no
+    /// `Degradation` contract to surface through).
+    async fn backfill_signatures_by_language(&self, nodes: &mut [NodeDto]) {
+        let languages: HashSet<String> = nodes
+            .iter()
+            .filter(|n| n.signature.is_none())
+            .map(|n| n.language.clone())
+            .collect();
+        for language in languages {
+            if let Ok(Some(client)) = self.acquire_opt(Some(&language)).await {
+                let acquired = AcquiredClient {
+                    client,
+                    language: Some(language),
+                };
+                self.backfill_signatures(nodes.iter_mut(), &acquired).await;
+            }
+        }
+    }
+
     // --- internals -----------------------------------------------------------
 
     /// Resolve the anchor language for a symref and acquire a client for it.
@@ -604,6 +708,14 @@ impl QueryRuntime {
             RestartPolicy::default_real(),
         )
     }
+}
+
+/// Project a `CallGraphNode` to its `node` field, as a plain `fn` item rather
+/// than a closure — `Iterator::map` closures are inferred higher-ranked over
+/// their argument's lifetime by default, which doesn't unify with
+/// `backfill_signatures`'s single fn-level `'a`; a named `fn` sidesteps that.
+fn call_graph_node_signature_mut(item: &mut CallGraphNode) -> &mut NodeDto {
+    &mut item.node
 }
 
 /// `Some(Degradation)` when `timed_out` — the acquired client was healthy, but
@@ -774,6 +886,7 @@ mod tests {
                 &SymbolRef::Fqn("repo.nope".into()),
                 &Filter::default(),
                 &Page::default(),
+                false,
             )
             .await
             .expect("degrades, not errors");
@@ -1063,6 +1176,155 @@ mod tests {
         runtime.shutdown_all().await;
     }
 
+    /// Real pyright, end-to-end: `find_definition`'s hover-driven `signature`
+    /// backfill must also work for a *cross-file* target, whose `uri` differs
+    /// from the usage site's (which is the only one `ensure_open`ed before
+    /// this fix) — an unopened target answers `hover` with `null` even
+    /// though it resolves correctly via `definition`. Ignored by default —
+    /// it needs node/npm and provisions pyright from npm on first run.
+    #[ignore = "requires node/npm; provisions pyright from npm on first run"]
+    #[tokio::test]
+    async fn find_definition_backfills_signature_across_files() {
+        let dir = tempdir().expect("tempdir");
+        let app = dir.path().join("app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join("helper_mod.py"), "def helper():\n    return 1\n").unwrap();
+        fs::write(
+            app.join("caller_mod.py"),
+            "from app.helper_mod import helper\n\ndef use():\n    return helper()\n",
+        )
+        .unwrap();
+
+        let root_uri = root_uri_for(dir.path());
+        let cache_dir = dir.path().join(".semnav");
+        let servers_dir = cache_dir.join("servers");
+        let db_path = cache_dir.join("graph.db");
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let db = DbActor::spawn(&db_path).expect("spawn db");
+        index_language(&db, "python", &root_uri, &servers_dir)
+            .await
+            .expect("index python");
+
+        let engine = QueryEngine::new(db, root_uri.clone());
+        let runtime = QueryRuntime::open(engine, servers_dir);
+
+        let caller_uri = format!("{}app/caller_mod.py", root_uri);
+        let (res, degradation) = runtime
+            .find_definition(&SymbolRef::At {
+                uri: caller_uri,
+                line: 3,
+                character: 11,
+            })
+            .await
+            .expect("find_definition through real pyright");
+        assert_eq!(res.nodes.len(), 1);
+        assert_eq!(res.nodes[0].name, "helper");
+        assert!(degradation.is_none());
+        assert!(
+            res.nodes[0]
+                .signature
+                .as_deref()
+                .is_some_and(|s| s.contains("helper")),
+            "cross-file target must still get a hover-derived signature: {:?}",
+            res.nodes[0].signature
+        );
+
+        runtime.shutdown_all().await;
+    }
+
+    /// Real pyright, end-to-end: `with_signature=true` backfills each
+    /// returned node's `signature` via hover on `find_symbol` (which has no
+    /// pinned anchor language, so it must acquire python's server itself)
+    /// and `find_callers` (which reuses the anchor's own client)
+    /// (`docs/design/mcp-tools.md` "Populating `signature`"). Ignored by
+    /// default — it needs node/npm and provisions pyright from npm on first
+    /// run.
+    #[ignore = "requires node/npm; provisions pyright from npm on first run"]
+    #[tokio::test]
+    async fn with_signature_backfills_hover_derived_signature() {
+        let dir = tempdir().expect("tempdir");
+        let app = dir.path().join("app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join("mod.py"),
+            "def helper():\n    return 1\n\ndef caller():\n    return helper()\n",
+        )
+        .unwrap();
+
+        let root_uri = root_uri_for(dir.path());
+        let cache_dir = dir.path().join(".semnav");
+        let servers_dir = cache_dir.join("servers");
+        let db_path = cache_dir.join("graph.db");
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let db = DbActor::spawn(&db_path).expect("spawn db");
+        index_language(&db, "python", &root_uri, &servers_dir)
+            .await
+            .expect("index python");
+
+        let engine = QueryEngine::new(db, root_uri.clone());
+        let runtime = QueryRuntime::open(engine, servers_dir);
+
+        let symbol_result = runtime
+            .find_symbol(
+                "helper",
+                MatchMode::Segment,
+                false,
+                FindSymbolOptions {
+                    brief: false,
+                    with_signature: true,
+                },
+                &Filter::default(),
+                &Page::default(),
+            )
+            .await
+            .expect("find_symbol through real pyright");
+        assert_eq!(symbol_result.nodes.len(), 1);
+        assert!(
+            symbol_result.nodes[0]
+                .signature
+                .as_deref()
+                .is_some_and(|s| s.contains("helper")),
+            "with_signature must backfill a hover-derived signature: {:?}",
+            symbol_result.nodes[0].signature
+        );
+
+        let (callers_result, _, _) = runtime
+            .find_callers(
+                &SymbolRef::Fqn("app.mod.helper".to_string()),
+                &Filter::default(),
+                &Page::default(),
+                true,
+            )
+            .await
+            .expect("find_callers through real pyright");
+        assert_eq!(callers_result.items.len(), 1);
+        assert!(
+            callers_result.items[0].node.signature.is_some(),
+            "with_signature must backfill the caller's signature too"
+        );
+
+        // Persisted, not just attached to one response: a later query with
+        // `with_signature=false` still sees it, served straight from the DB
+        // without hovering again.
+        let refetched = runtime
+            .find_symbol(
+                "helper",
+                MatchMode::Segment,
+                false,
+                FindSymbolOptions::default(),
+                &Filter::default(),
+                &Page::default(),
+            )
+            .await
+            .expect("refetch");
+        assert_eq!(
+            refetched.nodes[0].signature, symbol_result.nodes[0].signature,
+            "the backfilled signature is persisted, not just attached to one response"
+        );
+
+        runtime.shutdown_all().await;
+    }
+
     /// Real pyright, end-to-end: `find_callers`'s cache-first + background
     /// refresh (`docs/design/lsp-integration.md`). The first (cold) query
     /// blocks and returns the caller that exists at index time. After a
@@ -1100,7 +1362,7 @@ mod tests {
 
         // Cold: blocks, returns the one caller that exists at index time.
         let (first, degradation, refreshing) = runtime
-            .find_callers(&anchor, &Filter::default(), &Page::default())
+            .find_callers(&anchor, &Filter::default(), &Page::default(), false)
             .await
             .expect("cold query materializes");
         assert_eq!(first.items.len(), 1);
@@ -1122,7 +1384,7 @@ mod tests {
         // Warm: served from the (stale) cache immediately, background refresh
         // kicked off in the background.
         let (second, _, refreshing) = runtime
-            .find_callers(&anchor, &Filter::default(), &Page::default())
+            .find_callers(&anchor, &Filter::default(), &Page::default(), false)
             .await
             .expect("warm query serves cache");
         assert_eq!(second.items.len(), 1, "warm answer is the stale cache");
@@ -1147,7 +1409,7 @@ mod tests {
         for _ in 0..50 {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             let (res, _, _) = runtime
-                .find_callers(&anchor, &Filter::default(), &Page::default())
+                .find_callers(&anchor, &Filter::default(), &Page::default(), false)
                 .await
                 .expect("requery");
             if res.items.len() == 2 {

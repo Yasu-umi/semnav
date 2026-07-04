@@ -101,6 +101,22 @@ pub enum DbCommand {
         construct: String,
         reply: oneshot::Sender<Result<()>>,
     },
+    /// Persist a hover-derived `signature` for an existing node, by id
+    /// (`find_definition`'s `at` branch, which already has the node loaded).
+    UpdateNodeSignature {
+        id: i64,
+        signature: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    /// Persist a hover-derived `signature` for an existing node, by `fqn` —
+    /// used by the `with_signature` opt-in on `find_symbol`/`find_callers`/
+    /// `find_callees` (`QueryRuntime`), which only has the result `NodeDto`
+    /// (no numeric id) in hand.
+    UpdateNodeSignatureByFqn {
+        fqn: String,
+        signature: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
     /// Read `anchor_id`'s cached outgoing-callees content hash, if any
     /// (`docs/design/lsp-integration.md` "callees precise cache").
     GetCalleesCacheHash {
@@ -221,6 +237,22 @@ impl DbActor {
                     reply,
                 } => {
                     let res = update_node_construct(&conn, id, &construct);
+                    let _ = reply.send(res);
+                }
+                DbCommand::UpdateNodeSignature {
+                    id,
+                    signature,
+                    reply,
+                } => {
+                    let res = update_node_signature(&conn, id, &signature);
+                    let _ = reply.send(res);
+                }
+                DbCommand::UpdateNodeSignatureByFqn {
+                    fqn,
+                    signature,
+                    reply,
+                } => {
+                    let res = update_node_signature_by_fqn(&conn, &fqn, &signature);
                     let _ = reply.send(res);
                 }
                 DbCommand::GetCalleesCacheHash { anchor_id, reply } => {
@@ -408,6 +440,34 @@ impl DbActor {
             .send(DbCommand::UpdateNodeConstruct {
                 id,
                 construct: construct.to_string(),
+                reply: tx,
+            })
+            .await
+            .map_err(|_| anyhow!("db actor closed"))?;
+        rx.await.map_err(|_| anyhow!("db actor dropped reply"))?
+    }
+
+    /// Persist a hover-derived `signature` for an existing node, by id.
+    pub async fn update_node_signature(&self, id: i64, signature: &str) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbCommand::UpdateNodeSignature {
+                id,
+                signature: signature.to_string(),
+                reply: tx,
+            })
+            .await
+            .map_err(|_| anyhow!("db actor closed"))?;
+        rx.await.map_err(|_| anyhow!("db actor dropped reply"))?
+    }
+
+    /// Persist a hover-derived `signature` for an existing node, by `fqn`.
+    pub async fn update_node_signature_by_fqn(&self, fqn: &str, signature: &str) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbCommand::UpdateNodeSignatureByFqn {
+                fqn: fqn.to_string(),
+                signature: signature.to_string(),
                 reply: tx,
             })
             .await
@@ -833,6 +893,22 @@ fn update_node_construct(conn: &Connection, id: i64, construct: &str) -> Result<
     Ok(())
 }
 
+fn update_node_signature(conn: &Connection, id: i64, signature: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE nodes SET signature = ?1 WHERE id = ?2",
+        params![signature, id],
+    )?;
+    Ok(())
+}
+
+fn update_node_signature_by_fqn(conn: &Connection, fqn: &str, signature: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE nodes SET signature = ?1 WHERE fqn = ?2",
+        params![signature, fqn],
+    )?;
+    Ok(())
+}
+
 const GET_CALLEES_CACHE_SQL: &str = "SELECT content_hash FROM callees_cache WHERE anchor_id = ?1";
 
 fn get_callees_cache_hash(conn: &Connection, anchor_id: i64) -> Result<Option<String>> {
@@ -1251,6 +1327,52 @@ mod tests {
         assert!(got.valid);
         assert!(!got.orphan);
         assert!(!got.is_external);
+    }
+
+    #[tokio::test]
+    async fn update_node_signature_persists_by_id() {
+        let dir = tempdir().expect("tempdir");
+        let db = dir.path().join("graph.db");
+        let actor = DbActor::spawn(&db).expect("spawn");
+
+        let id = actor
+            .upsert_node(sample_node("app.sample"))
+            .await
+            .expect("upsert");
+        actor
+            .update_node_signature(id, "def sample() -> None")
+            .await
+            .expect("update");
+
+        let got = actor
+            .get_node_by_fqn("app.sample")
+            .await
+            .expect("get")
+            .expect("row");
+        assert_eq!(got.signature.as_deref(), Some("def sample() -> None"));
+    }
+
+    #[tokio::test]
+    async fn update_node_signature_by_fqn_persists() {
+        let dir = tempdir().expect("tempdir");
+        let db = dir.path().join("graph.db");
+        let actor = DbActor::spawn(&db).expect("spawn");
+
+        actor
+            .upsert_node(sample_node("app.sample"))
+            .await
+            .expect("upsert");
+        actor
+            .update_node_signature_by_fqn("app.sample", "def sample() -> None")
+            .await
+            .expect("update");
+
+        let got = actor
+            .get_node_by_fqn("app.sample")
+            .await
+            .expect("get")
+            .expect("row");
+        assert_eq!(got.signature.as_deref(), Some("def sample() -> None"));
     }
 
     #[tokio::test]

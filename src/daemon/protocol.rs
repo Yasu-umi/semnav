@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::mcp::dto::{
-    FindDefinitionInput, FindSymbolInput, ReadRangeInput, RestartLspInput, SymbolQueryInput,
+    CallGraphQueryInput, FindDefinitionInput, FindSymbolInput, ReadRangeInput, RestartLspInput,
+    SymbolQueryInput,
 };
 
 /// One of the 7 tools, or the daemon-only `Shutdown` control message. Mirrors
@@ -25,8 +26,8 @@ pub enum DaemonRequest {
     FindSymbol(FindSymbolInput),
     FindDefinition(FindDefinitionInput),
     FindReferences(SymbolQueryInput),
-    FindCallers(SymbolQueryInput),
-    FindCallees(SymbolQueryInput),
+    FindCallers(CallGraphQueryInput),
+    FindCallees(CallGraphQueryInput),
     ReadRange(ReadRangeInput),
     RestartLsp(RestartLspInput),
     /// Not a query op: tells the daemon to run its graceful-shutdown path
@@ -96,6 +97,7 @@ mod tests {
                 match_mode: Default::default(),
                 ignore_case: false,
                 brief: false,
+                with_signature: false,
                 filter: FilterInput::default(),
                 page: PageInput::default(),
             }),

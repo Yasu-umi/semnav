@@ -88,10 +88,11 @@ Node = {
 
 ```
 input  = {
-  pattern:      string,
-  match?:       "segment" | "contains" | "exact" = "segment",
-  ignore_case?: bool = false,
-  brief?:       bool = false,
+  pattern:         string,
+  match?:          "segment" | "contains" | "exact" = "segment",
+  ignore_case?:    bool = false,
+  brief?:          bool = false,
+  with_signature?: bool = false,
 } & Filter & Page
 output = { nodes: Node[], fqns: string[], next_cursor?: string }
 ```
@@ -100,6 +101,7 @@ output = { nodes: Node[], fqns: string[], next_cursor?: string }
 * `contains`: substring match (`%save%`). Nothing is missed, but it also hits `preserve`
 * `exact`: exact FQN match
 * **`brief`**: when `true`, the response fills `fqns` (just the matched FQN strings) and leaves `nodes` empty, instead of the reverse. A wide `match="contains"` pattern can page through hundreds of full `Node`s (`range`/`signature`/`documentation`/...) and blow past a response token budget; `brief` lets a caller gauge match count or narrow the pattern first, before paying for full metadata.
+* **`with_signature`**: best-effort hover backfill of `signature` for each returned node that doesn't already have one — see "Populating `signature`" below. No-op when `brief` is set (there are no `Node`s to enrich).
 
 ### find_definition — usage position → declaration
 
@@ -131,7 +133,7 @@ output = {
 ### find_callers — call sites of the caller
 
 ```
-input  = SymbolRef & Filter & Page
+input  = SymbolRef & Filter & Page & { with_signature?: bool = false }
 output = {
   callers: [{ node: Node, call_sites: Range[] }][],   // node=caller, call_sites=positions where the call occurs
   next_cursor?: string,
@@ -143,11 +145,12 @@ output = {
 * **The `calls` edge cannot be built from documentSymbol alone** → built on first use on demand by querying callHierarchy ([lsp-integration.md](./lsp-integration.md))
 * The caller of a module-scope call (`main()`) becomes a `(module)` node (`kind=2`)
 * **Cache-first + background refresh**: same contract as `find_references` above — a warm anchor is served from the cache with `refreshing: true` while a fresh materialization runs in the background; a cold anchor blocks once ([lsp-integration.md](./lsp-integration.md), [resilience.md](./resilience.md))
+* **`with_signature`**: best-effort hover backfill of `signature` on each returned `node` — see "Populating `signature`" below
 
 ### find_callees — call targets
 
 ```
-input  = SymbolRef & Filter & Page
+input  = SymbolRef & Filter & Page & { with_signature?: bool = false }
 output = {
   callees: [{ node: Node, call_sites: Range[] }][],   // node=call target, call_sites=positions where the call occurs within that function
   next_cursor?: string,
@@ -157,6 +160,16 @@ output = {
 * Origin: `callHierarchy/outgoingCalls` (`calls` edge)
 * tsserver: `to` sometimes points to the **type-resolved target (an interface method)** → the query side corrects this to the implementing class's method via the `implements` edge ([lsp-integration.md](./lsp-integration.md))
 * **Precise content-hash cache, not cache-first + background refresh**: unlike `find_callers`/`find_references`, the callee list is fully determined by the anchor's own file, so a byte-identical anchor file since the last materialization serves an exact cached answer with no LSP call and no `refreshing` field at all ([lsp-integration.md](./lsp-integration.md))
+* **`with_signature`**: best-effort hover backfill of `signature` on each returned `node` — see "Populating `signature`" below
+
+### Populating `signature`
+
+`signature` is hover-derived, not carried in documentSymbol, so it's populated lazily rather than at index time ([lsp-integration.md](./lsp-integration.md)):
+
+* **Always, for free**: `find_definition`'s `at` branch already calls `hover` once per resolved target to refine `construct` — that same round trip backfills `signature` too, at no extra LSP cost.
+* **Opt-in elsewhere**: `find_symbol`/`find_callers`/`find_callees` don't otherwise touch the LSP to build their `Node`s, so backfilling `signature` broadly means one extra `hover` call per node still missing one — up to `MAX_PAGE_LIMIT` (500) per page. `with_signature=true` opts into that cost; the default (`false`) keeps these three tools a pure graph/cache read.
+* **Persisted, not just attached to one response**: a successful backfill is written to the `nodes.signature` column immediately, so a later query for the same node (with or without `with_signature`) returns it from the cache without hovering again.
+* **Best-effort**: a hover failure (timeout, null, no client available) is swallowed and simply leaves `signature` unset — it never turns an otherwise-successful page into an error, matching `construct`-refinement's own silent-failure contract.
 
 ### read_range — source body text for a given range
 

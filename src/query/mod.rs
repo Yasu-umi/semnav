@@ -25,7 +25,9 @@ pub use dto::{
     CallGraphNode, CallGraphResult, FindDefinitionResult, FindReferencesResult, FindSymbolResult,
     NodeDto, Position, RangeDto, ReadRangeResult, ReferenceGroup, kind_label,
 };
-pub use filter::{Cursor, Filter, MAX_PAGE_LIMIT, MatchMode, Page, SortKey, SymbolRef};
+pub use filter::{
+    Cursor, Filter, FindSymbolOptions, MAX_PAGE_LIMIT, MatchMode, Page, SortKey, SymbolRef,
+};
 pub use lsp_query::{
     CallHierarchyItem, Hover, IncomingCall, Location, LspQueryClient, OutgoingCall,
 };
