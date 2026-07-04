@@ -118,20 +118,28 @@ pub async fn provision(adapter: &dyn LanguageAdapter, ctx: &ProvisionContext) ->
     let program = match resolved {
         Resolved::OnPath => spec.program.to_string(),
         Resolved::Isolated(path) => path.to_string_lossy().into_owned(),
-        Resolved::NeedsInstall => {
-            npm_install(&adapter.server_package(), &ctx.servers_dir, spec.program).await?;
-            let path = isolated_bin(&ctx.servers_dir, spec.program);
-            if !path.exists() {
-                bail!(
-                    "npm install completed but {} was not created; the `{}` package may \
-                     not provide the `{}` binary",
-                    path.display(),
-                    adapter.server_package().npm_package,
-                    spec.program
-                );
+        Resolved::NeedsInstall => match adapter.server_package() {
+            Some(pkg) => {
+                npm_install(&pkg, &ctx.servers_dir, spec.program).await?;
+                let path = isolated_bin(&ctx.servers_dir, spec.program);
+                if !path.exists() {
+                    bail!(
+                        "npm install completed but {} was not created; the `{}` package may \
+                         not provide the `{}` binary",
+                        path.display(),
+                        pkg.npm_package,
+                        spec.program
+                    );
+                }
+                path.to_string_lossy().into_owned()
             }
-            path.to_string_lossy().into_owned()
-        }
+            None => bail!(
+                "`{program}` not found on PATH; this language server isn't auto-installable \
+                 — install it manually (e.g. `rustup component add rust-analyzer`) and ensure \
+                 it's on PATH",
+                program = spec.program,
+            ),
+        },
     };
     Ok(build_command(spec, &program))
 }

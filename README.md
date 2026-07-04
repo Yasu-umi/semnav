@@ -36,9 +36,10 @@ The binary is produced at `target/release/semnav`.
 ## Usage
 
 ```
-semnav discover <root>   list source files (Python/TS) under <root>
+semnav discover <root>   list source files (Python/TS/Rust) under <root>
 semnav index <root>      index <root> into <root>/.semnav/graph.db
-                         (provisions pyright/tsserver via npm; needs node + npm)
+                         (provisions pyright/tsserver via npm, needs node + npm;
+                          rust-analyzer must already be on PATH, e.g. via rustup)
 semnav serve <root>      serve the 7 MCP tools over stdio, proxied to a
                          background daemon (auto-started; run `index` first)
 semnav daemon <root>     run the persistent daemon directly (usually auto-started by `serve`)

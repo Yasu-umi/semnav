@@ -27,12 +27,12 @@ impl LanguageAdapter for TypeScriptAdapter {
         }
     }
 
-    fn server_package(&self) -> ServerPackage {
-        ServerPackage {
+    fn server_package(&self) -> Option<ServerPackage> {
+        Some(ServerPackage {
             npm_package: "typescript-language-server",
             version: "5.1.3",
             peers: &["typescript@6.0.3"],
-        }
+        })
     }
 }
 

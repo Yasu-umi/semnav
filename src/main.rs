@@ -10,6 +10,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use rmcp::ServiceExt;
+use semnav::adapters::adapter_for_language;
 use semnav::daemon;
 use semnav::graph::DbActor;
 use semnav::indexer::{FsWatcher, discover_files, index_language, path_to_uri};
@@ -507,7 +508,7 @@ async fn run_index(root: &Path) -> ExitCode {
     };
 
     let root_uri = root_uri_for(root);
-    let languages = ["python", "typescript"];
+    let languages = ["python", "typescript", "rust"];
     let mut failures = 0u32;
     for language in languages {
         match index_language(&db, language, &root_uri, &servers_dir).await {
@@ -517,11 +518,21 @@ async fn run_index(root: &Path) -> ExitCode {
             Err(err) => {
                 failures += 1;
                 eprintln!("[{language}] failed: {err:#}");
-                eprintln!(
-                    "  hint: ensure node + npm are on PATH; semnav provisions the \
-                     {language} LSP server via npm into {}",
-                    servers_dir.display()
-                );
+                let npm_provisioned = adapter_for_language(language)
+                    .and_then(|a| a.server_package())
+                    .is_some();
+                if npm_provisioned {
+                    eprintln!(
+                        "  hint: ensure node + npm are on PATH; semnav provisions the \
+                         {language} LSP server via npm into {}",
+                        servers_dir.display()
+                    );
+                } else {
+                    eprintln!(
+                        "  hint: this language's server isn't auto-installable; ensure its \
+                         LSP server is on PATH (e.g. `rustup component add rust-analyzer` for Rust)"
+                    );
+                }
             }
         }
     }

@@ -26,12 +26,12 @@ impl LanguageAdapter for PythonAdapter {
         }
     }
 
-    fn server_package(&self) -> ServerPackage {
-        ServerPackage {
+    fn server_package(&self) -> Option<ServerPackage> {
+        Some(ServerPackage {
             npm_package: "pyright",
             version: "1.1.409",
             peers: &[],
-        }
+        })
     }
 }
 

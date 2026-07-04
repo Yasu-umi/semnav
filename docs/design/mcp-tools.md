@@ -45,7 +45,7 @@ Reason both modes are supported: agents want to ask both "what's the definition 
 
 ```
 Filter = {
-  language?:         "python" | "typescript",
+  language?:         "python" | "typescript" | "rust",
   kind?:             string[],          // inclusion array of kind_label. e.g. ["Function","Method"]
   include_external?: bool = false,      // false=exclude external nodes (default)
 }
@@ -70,7 +70,7 @@ Node = {
   fqn:              string,
   uri:              string,
   name:             string,
-  language:         "python" | "typescript",
+  language:         "python" | "typescript" | "rust",
   kind_label:       string,          // "Function" / "Class" / "TypeAlias" etc. (normalized below)
   kind_num:         uint,            // raw LSP SymbolKind value
   construct?:       string,          // auxiliary classification from hover ("type"/"interface"/...) [language-adapters.md]

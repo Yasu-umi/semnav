@@ -7,11 +7,13 @@
 mod kind;
 mod provision;
 mod python;
+mod rust;
 mod typescript;
 
 pub use kind::{NodeKind, SymbolKind};
 pub use provision::{ProvisionContext, provision};
 pub use python::PythonAdapter;
+pub use rust::RustAdapter;
 pub use typescript::TypeScriptAdapter;
 
 /// How to launch the language server: the binary name plus its fixed args
@@ -67,8 +69,11 @@ pub trait LanguageAdapter: Send + Sync {
     fn server_command(&self) -> CommandSpec;
 
     /// npm package metadata for isolated install when the server is not on
-    /// `PATH` (`docs/design/language-adapters.md`).
-    fn server_package(&self) -> ServerPackage;
+    /// `PATH` (`docs/design/language-adapters.md`). `None` when this
+    /// language's server isn't distributed via npm (e.g. rust-analyzer via
+    /// `rustup`) — provisioning then requires the server already be on
+    /// `PATH`, failing with a clear error otherwise.
+    fn server_package(&self) -> Option<ServerPackage>;
 
     /// Map an LSP `SymbolKind` number to a [`NodeKind`]. The default pass-through
     /// works for both pyright and tsserver (both emit standard values); the TS
@@ -103,10 +108,11 @@ pub trait LanguageAdapter: Send + Sync {
     }
 }
 
-/// The built-in adapters shipped with 0.0.1 (Python + TypeScript). References
-/// are `'static` (unit-struct ZST promotion), so the registry is cheap to build.
+/// The built-in adapters shipped with 0.0.1 (Python, TypeScript, Rust).
+/// References are `'static` (unit-struct ZST promotion), so the registry is
+/// cheap to build.
 pub fn builtin_adapters() -> Vec<&'static dyn LanguageAdapter> {
-    vec![&PythonAdapter, &TypeScriptAdapter]
+    vec![&PythonAdapter, &TypeScriptAdapter, &RustAdapter]
 }
 
 /// Pick the built-in adapter that owns `uri`, if any.
@@ -148,11 +154,12 @@ mod tests {
     }
 
     #[test]
-    fn builtin_adapters_cover_python_and_typescript() {
+    fn builtin_adapters_cover_python_typescript_and_rust() {
         let adapters = builtin_adapters();
-        assert_eq!(adapters.len(), 2);
+        assert_eq!(adapters.len(), 3);
         assert_eq!(adapters[0].language_name(), "python");
         assert_eq!(adapters[1].language_name(), "typescript");
+        assert_eq!(adapters[2].language_name(), "rust");
     }
 
     #[test]
@@ -164,6 +171,10 @@ mod tests {
         assert_eq!(
             select_for_uri("file:///app/mod.tsx").map(|a| a.language_name()),
             Some("typescript")
+        );
+        assert_eq!(
+            select_for_uri("file:///app/main.rs").map(|a| a.language_name()),
+            Some("rust")
         );
         assert!(select_for_uri("file:///app/Cargo.toml").is_none());
     }
@@ -184,27 +195,36 @@ mod tests {
                 args: &["--stdio"],
             }
         );
+        assert_eq!(
+            RustAdapter.server_command(),
+            CommandSpec {
+                program: "rust-analyzer",
+                args: &[],
+            }
+        );
     }
 
     #[test]
     fn server_package_pins_versions() {
         assert_eq!(
             PythonAdapter.server_package(),
-            ServerPackage {
+            Some(ServerPackage {
                 npm_package: "pyright",
                 version: "1.1.409",
                 peers: &[],
-            }
+            })
         );
         // tsserver needs the typescript peer that the language-server drives.
         assert_eq!(
             TypeScriptAdapter.server_package(),
-            ServerPackage {
+            Some(ServerPackage {
                 npm_package: "typescript-language-server",
                 version: "5.1.3",
                 peers: &["typescript@6.0.3"],
-            }
+            })
         );
+        // rust-analyzer isn't npm-distributed; must already be on PATH.
+        assert_eq!(RustAdapter.server_package(), None);
     }
 
     #[test]
@@ -217,6 +237,10 @@ mod tests {
             adapter_for_language("typescript").map(|a| a.language_name()),
             Some("typescript")
         );
-        assert!(adapter_for_language("rust").is_none());
+        assert_eq!(
+            adapter_for_language("rust").map(|a| a.language_name()),
+            Some("rust")
+        );
+        assert!(adapter_for_language("go").is_none());
     }
 }

@@ -2,7 +2,7 @@
 
 ## Language Adapter
 
-0.0.1 targets **Python** and **TypeScript (tsserver)**.
+0.0.1 targets **Python**, **TypeScript (tsserver)**, and **Rust (rust-analyzer)**.
 
 > For the actual response structures per LSP method and the language differences (pyright vs tsserver), see [lsp-integration.md](./lsp-integration.md).
 
@@ -44,6 +44,7 @@ LSP server binaries are not bundled with the Rust binary; they are procured via 
 2. If not found, install it into an isolated directory
    * TypeScript: `typescript-language-server` (via npm)
    * Python: `pyright` (via npm) or basedpyright
+   * Rust: not auto-installed — `rust-analyzer` isn't npm-distributed. `LanguageAdapter::server_package` returns `None` for it, which short-circuits step 2 into a clear error pointing at `rustup component add rust-analyzer` rather than attempting an npm install.
 3. If the runtime requirements (Node.js / Python) are not met, guide the user through the installation steps with a clear error message
 
 The binary is kept lightweight, and language runtimes ride on whatever is present in the environment.
