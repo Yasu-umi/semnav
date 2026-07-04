@@ -12,6 +12,7 @@ use std::hash::{Hash, Hasher};
 
 use serde::Deserialize;
 
+use crate::adapters::SymbolKind;
 use crate::graph::Range;
 
 /// LSP `Position` (0-based line, UTF-16 `character`).
@@ -68,6 +69,45 @@ impl LspRange {
             start_col: self.start.character as i64,
             end_line: self.end.line as i64,
             end_col: self.end.character as i64,
+        }
+    }
+}
+
+impl FlatSymbol {
+    /// Synthetic root symbol for `module_path`, spanning the whole file.
+    ///
+    /// `textDocument/documentSymbol` never yields an entry for the module
+    /// itself, so a bare module-top-level position (a call or reference
+    /// outside every `def`/`class`) has no indexed node covering it —
+    /// `find_node_by_position` (`src/graph/db.rs`) returns `None` and the
+    /// caller silently drops that occurrence (`docs/design/lsp-integration.md`
+    /// "callHierarchy" pyright note: "a module node is generated to serve as
+    /// the entry-point caller"). Appending this to the flat list gives every
+    /// position in the file a covering container.
+    pub fn module_root(module_path: &str) -> Self {
+        let name = module_path
+            .rsplit('.')
+            .next()
+            .unwrap_or(module_path)
+            .to_string();
+        FlatSymbol {
+            fqn: module_path.to_string(),
+            name,
+            kind: SymbolKind::Module as u32,
+            range: Range {
+                start_line: 0,
+                start_col: 0,
+                end_line: i64::MAX,
+                end_col: i64::MAX,
+            },
+            sel: Range {
+                start_line: 0,
+                start_col: 0,
+                end_line: 0,
+                end_col: 0,
+            },
+            detail: None,
+            parent: None,
         }
     }
 }
@@ -248,6 +288,19 @@ mod tests {
         assert_eq!(flat[2].fqn, "m.A.B.c");
         assert_eq!(flat[2].parent, Some(1));
         assert_eq!(flat[1].parent, Some(0));
+    }
+
+    #[test]
+    fn module_root_spans_whole_file_and_has_no_parent() {
+        let root = FlatSymbol::module_root("app.repo");
+        assert_eq!(root.fqn, "app.repo");
+        assert_eq!(root.name, "repo");
+        assert_eq!(root.kind, 2);
+        assert_eq!(root.parent, None);
+        assert_eq!(root.range.start_line, 0);
+        assert_eq!(root.range.start_col, 0);
+        assert_eq!(root.range.end_line, i64::MAX);
+        assert_eq!(root.range.end_col, i64::MAX);
     }
 
     #[test]

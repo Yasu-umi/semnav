@@ -680,6 +680,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn find_callers_falls_back_to_module_node_for_top_level_call_site() {
+        // No `scenario()` here: it seeds only function nodes, but this test
+        // needs a synthetic module node (`FlatSymbol::module_root`) to prove
+        // the fix — a call site outside every def/class now resolves instead
+        // of being silently dropped by `find_node_by_position` returning None.
+        let dir = tempdir().unwrap();
+        let db = crate::graph::DbActor::spawn(&dir.path().join("g.db")).unwrap();
+        std::mem::forget(dir);
+        let engine = QueryEngine::new(db, "file:///repo".to_string());
+
+        let helper = func("repo.mod.helper", "helper", 0);
+        engine.db().upsert_node(helper).await.unwrap();
+
+        let module = crate::graph::Node {
+            id: None,
+            fqn: "repo.mod".to_string(),
+            uri: URI.to_string(),
+            name: "mod".to_string(),
+            language: "python".to_string(),
+            kind: 2,
+            node_kind: "Module".to_string(),
+            construct: None,
+            container_id: None,
+            range: GRange {
+                start_line: 0,
+                start_col: 0,
+                end_line: i64::MAX,
+                end_col: i64::MAX,
+            },
+            sel: GRange {
+                start_line: 0,
+                start_col: 0,
+                end_line: 0,
+                end_col: 0,
+            },
+            signature: None,
+            documentation: None,
+            detail: None,
+            signature_hash: None,
+            valid: true,
+            orphan: false,
+            generation: 0,
+            is_external: false,
+        };
+        engine.db().upsert_node(module).await.unwrap();
+
+        let mut mock = MockLspQueryClient::new();
+        let helper_item = CallHierarchyItem {
+            name: "helper".into(),
+            kind: 12,
+            uri: URI.into(),
+            range: rng(0, 0, 2, 0),
+            selection_range: rng(0, 4, 0, 10),
+            raw: json!({ "uri": URI, "name": "helper", "data": "h" }),
+        };
+        mock.prepare
+            .insert((URI.to_string(), 0, 4), vec![helper_item.clone()]);
+
+        // Call site at bare module top level (line 20) — outside every
+        // def/class, so only the synthetic module node covers it.
+        let module_item = CallHierarchyItem {
+            name: "mod".into(),
+            kind: 2,
+            uri: URI.into(),
+            range: rng(0, 0, 100, 0),
+            selection_range: rng(20, 0, 20, 6),
+            raw: json!({ "uri": URI, "name": "mod", "data": "m" }),
+        };
+        mock.incoming.insert(
+            helper_item.key(),
+            vec![IncomingCall {
+                from: module_item,
+                from_ranges: vec![rng(20, 0, 20, 6)],
+            }],
+        );
+
+        let res = engine
+            .find_callers(
+                &SymbolRef::Fqn("repo.mod.helper".into()),
+                &Filter::default(),
+                &Page::default(),
+                Some(&mock),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.items.len(), 1);
+        assert_eq!(res.items[0].node.fqn, "repo.mod");
+        assert_eq!(res.items[0].call_sites[0].start.line, 20);
+    }
+
+    #[tokio::test]
     async fn find_callees_materializes_outgoing_calls() {
         let (engine, mock) = scenario().await;
         let res = engine

@@ -51,7 +51,8 @@ pub async fn index_repository(
             }
         };
         let module_path = module_path_from_uri(&uri, root_uri);
-        let flat = flatten_document_symbols(&symbols, &module_path);
+        let mut flat = flatten_document_symbols(&symbols, &module_path);
+        flat.push(FlatSymbol::module_root(&module_path));
         upsert_symbol_tree(db, &flat, adapter, &uri, root_uri).await?;
         stats.files_indexed += 1;
         stats.symbols_upserted += flat.len() as u64;
@@ -200,7 +201,7 @@ mod tests {
             .expect("index");
         assert_eq!(stats.files_seen, 1);
         assert_eq!(stats.files_indexed, 1);
-        assert_eq!(stats.symbols_upserted, 2);
+        assert_eq!(stats.symbols_upserted, 3);
         assert_eq!(stats.fetch_errors, 0);
 
         let parent = db
@@ -220,6 +221,14 @@ mod tests {
         assert_eq!(child.language, "python");
         assert_eq!(child.container_id, parent.id);
         assert!(!child.is_external);
+
+        let module = db
+            .get_node_by_fqn("app.repo")
+            .await
+            .unwrap()
+            .expect("synthetic module node");
+        assert_eq!(module.node_kind, "Module");
+        assert_eq!(module.container_id, None);
 
         // The `contains` edge: a second WAL reader can inspect it concurrently.
         let conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -266,6 +275,6 @@ mod tests {
         assert_eq!(stats.files_seen, 2);
         assert_eq!(stats.files_indexed, 1);
         assert_eq!(stats.fetch_errors, 1);
-        assert_eq!(stats.symbols_upserted, 1);
+        assert_eq!(stats.symbols_upserted, 2);
     }
 }
