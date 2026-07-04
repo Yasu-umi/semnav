@@ -8,6 +8,7 @@
 //! `serve` holds none of this module's server-side state: it never opens
 //! `graph.db` or an LSP supervisor directly once proxying is wired in (Step 3).
 
+pub mod client;
 pub mod discovery;
 pub mod lock;
 pub mod protocol;

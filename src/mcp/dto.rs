@@ -202,27 +202,29 @@ pub struct RestartLspInput {
 }
 
 /// `restart_lsp` response: the languages whose server was actually reset.
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RestartLspResult {
     pub restarted: Vec<String>,
 }
 
 /// The degraded-response annotation, folded into a tool's output only when a
 /// degradation actually occurred (`docs/design/resilience.md`) — never
-/// serialized as `degraded: false`.
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+/// serialized as `degraded: false`. Owned `String` fields (not `&'static
+/// str`): the daemon's proxy leg round-trips this through JSON on both
+/// directions, and `&'static str` can't implement `Deserialize`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DegradeInfo {
     pub degraded: bool,
-    pub degrade_reason: &'static str,
-    pub lsp_status: &'static str,
+    pub degrade_reason: String,
+    pub lsp_status: String,
 }
 
 impl From<Degradation> for DegradeInfo {
     fn from(d: Degradation) -> Self {
         DegradeInfo {
             degraded: true,
-            degrade_reason: degrade_reason_str(d.reason),
-            lsp_status: lsp_status_str(d.status),
+            degrade_reason: degrade_reason_str(d.reason).to_string(),
+            lsp_status: lsp_status_str(d.status).to_string(),
         }
     }
 }
@@ -244,7 +246,7 @@ fn lsp_status_str(status: LspStatus) -> &'static str {
 /// `find_definition` response: the domain result plus an optional degradation
 /// annotation, flattened together (field names already match the wire
 /// contract).
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FindDefinitionOutput {
     #[serde(flatten)]
     pub result: FindDefinitionResult,
@@ -262,7 +264,7 @@ impl From<(FindDefinitionResult, Option<Degradation>)> for FindDefinitionOutput 
 }
 
 /// `find_references` response: see [`FindDefinitionOutput`].
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FindReferencesOutput {
     #[serde(flatten)]
     pub result: FindReferencesResult,
@@ -282,7 +284,7 @@ impl From<(FindReferencesResult, Option<Degradation>)> for FindReferencesOutput 
 /// `find_callers` response. Domain's `CallGraphResult.items` is renamed to
 /// `callers` on the wire, so this reconstructs fields explicitly rather than
 /// flattening.
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FindCallersOutput {
     pub callers: Vec<CallGraphNode>,
     pub next_cursor: Option<String>,
@@ -301,7 +303,7 @@ impl From<(CallGraphResult, Option<Degradation>)> for FindCallersOutput {
 }
 
 /// `find_callees` response: see [`FindCallersOutput`].
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FindCalleesOutput {
     pub callees: Vec<CallGraphNode>,
     pub next_cursor: Option<String>,

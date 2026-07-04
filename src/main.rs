@@ -13,7 +13,7 @@ use rmcp::ServiceExt;
 use semnav::daemon;
 use semnav::graph::DbActor;
 use semnav::indexer::{FsWatcher, discover_files, index_language, path_to_uri};
-use semnav::mcp::SemnavServer;
+use semnav::mcp::{ProxyServer, SemnavServer};
 use semnav::query::{QueryEngine, QueryRuntime};
 
 fn main() -> ExitCode {
@@ -41,10 +41,9 @@ fn print_help() {
     eprintln!("  semnav discover <root>   list source files (Python/TS) under <root>");
     eprintln!("  semnav index <root>      index <root> into <root>/.semnav/graph.db");
     eprintln!("                           (provisions pyright/tsserver via npm; needs node + npm)");
-    eprintln!("  semnav serve <root>      serve the 6 MCP tools over stdio against");
-    eprintln!("                           <root>/.semnav/graph.db (run `index` first)");
-    eprintln!("  semnav daemon <root>     run a persistent daemon holding LSP servers warm");
-    eprintln!("                           across connections (standalone; not yet wired into `serve`)");
+    eprintln!("  semnav serve <root>      serve the 7 MCP tools over stdio, proxied to a");
+    eprintln!("                           background daemon (auto-started; run `index` first)");
+    eprintln!("  semnav daemon <root>     run the persistent daemon directly (usually auto-started by `serve`)");
     eprintln!("  semnav daemon stop <root> stop a running daemon for <root>");
     eprintln!();
     eprintln!("environment:");
@@ -114,12 +113,14 @@ fn serve(args: &[String]) -> ExitCode {
     runtime.block_on(run_serve(&root))
 }
 
-/// Serve the 6 MCP tools over stdio against an already-indexed graph
-/// (`docs/design/mcp-tools.md`). Runs until the client closes the stdio
-/// transport, then shuts down every provisioned LSP server before exiting.
+/// Serve the 7 MCP tools over stdio, proxied to a persistent background
+/// `daemon` (`docs/design/daemon-lifecycle.md`). `serve` holds none of the
+/// domain state itself — no `DbActor`, no `QueryRuntime`, no LSP supervisor —
+/// it auto-starts the daemon if one isn't already running for `root`, then
+/// forwards every tool call over `DaemonClient`. Runs until the client closes
+/// the stdio transport; the daemon keeps running independently afterward.
 async fn run_serve(root: &Path) -> ExitCode {
     let cache_dir = resolve_cache_dir(root);
-    let servers_dir = cache_dir.join("servers");
     let db_path = cache_dir.join("graph.db");
     if !db_path.exists() {
         eprintln!(
@@ -130,26 +131,20 @@ async fn run_serve(root: &Path) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let db = match DbActor::spawn(&db_path) {
-        Ok(db) => db,
+    if let Err(err) = ensure_daemon_running(root, &cache_dir).await {
+        eprintln!("serve: {err}");
+        return ExitCode::FAILURE;
+    }
+
+    let sock_path = daemon::discovery::sock_path(&cache_dir);
+    let daemon_client = match daemon::client::DaemonClient::connect(&sock_path).await {
+        Ok(client) => client,
         Err(err) => {
-            eprintln!("serve: cannot open {}: {err:#}", db_path.display());
+            eprintln!("serve: {err:#}");
             return ExitCode::FAILURE;
         }
     };
-
-    let root_uri = root_uri_for(root);
-    let engine = QueryEngine::new(db.clone(), root_uri.clone());
-    let query_runtime = Arc::new(QueryRuntime::open(engine, servers_dir));
-    let server = SemnavServer::new(query_runtime.clone());
-
-    let watcher = FsWatcher::spawn(db, query_runtime.clone(), root.to_path_buf(), root_uri)
-        .inspect_err(|err| {
-            eprintln!(
-                "serve: fs watcher failed to start (continuing without live invalidation): {err:#}"
-            );
-        })
-        .ok();
+    let server = ProxyServer::new(daemon_client);
 
     let mut shutdown_rx = install_shutdown_signal();
     let result = match server.serve(rmcp::transport::io::stdio()).await {
@@ -163,24 +158,105 @@ async fn run_serve(root: &Path) -> ExitCode {
         }
         Err(err) => {
             eprintln!("serve: failed to start: {err:#}");
-            if let Some(watcher) = &watcher {
-                watcher.shutdown().await;
-            }
-            query_runtime.shutdown_all().await;
             return ExitCode::FAILURE;
         }
     };
 
-    if let Some(watcher) = &watcher {
-        watcher.shutdown().await;
-    }
-    query_runtime.shutdown_all().await;
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("serve: transport error: {err:#}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Maximum wait for a freshly-spawned (or concurrently-being-spawned) daemon
+/// to bind its socket. The daemon itself doesn't wait on LSP readiness before
+/// accepting connections (supervisors are lazy, exactly as `serve` used to
+/// be), so this only has to cover process startup + db open, not any LSP
+/// round-trip.
+const DAEMON_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const DAEMON_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Ensure a daemon is running for `root`, spawning one (detached) if none is
+/// live yet. Two `serve` processes racing here is safe: whichever loses the
+/// `DaemonLock` just waits for the winner's socket; if a narrow race lets a
+/// second daemon process start anyway, its own `run_daemon` self-check
+/// refuses to bind and exits — this loop only cares that *some* daemon
+/// eventually answers, not which one.
+async fn ensure_daemon_running(root: &Path, cache_dir: &Path) -> Result<(), String> {
+    if daemon::discovery::probe_liveness(cache_dir).await == daemon::discovery::Liveness::Live {
+        return Ok(());
+    }
+    if let Err(err) = tokio::fs::create_dir_all(cache_dir).await {
+        return Err(format!("cannot create {}: {err:#}", cache_dir.display()));
+    }
+
+    let lock_path = daemon::discovery::lock_path(cache_dir);
+    match daemon::lock::DaemonLock::try_acquire(&lock_path) {
+        Ok(Some(lock)) => {
+            // Release immediately: the spawned daemon acquires this same
+            // lock itself as the first thing it does, so `serve` must not
+            // still be holding it when that happens.
+            drop(lock);
+            spawn_detached_daemon(root, cache_dir)?;
+            wait_for_daemon_ready(cache_dir).await
+        }
+        Ok(None) => wait_for_daemon_ready(cache_dir).await,
+        Err(err) => Err(format!("cannot acquire {}: {err:#}", lock_path.display())),
+    }
+}
+
+/// Spawn `semnav daemon <root>` detached from this process: a new process
+/// group (so it isn't killed by a signal sent to `serve`'s group) and
+/// redirected stdio (so it doesn't hold `serve`'s pipes open, and its own
+/// diagnostics land in `daemon.log` instead of nowhere). Deliberately not
+/// `.wait()`ed — the daemon must outlive `serve`.
+fn spawn_detached_daemon(root: &Path, cache_dir: &Path) -> Result<(), String> {
+    let current_exe =
+        std::env::current_exe().map_err(|e| format!("cannot resolve current exe: {e:#}"))?;
+    let log_path = daemon::discovery::log_path(cache_dir);
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| format!("cannot open {}: {e:#}", log_path.display()))?;
+    let log_file2 = log_file
+        .try_clone()
+        .map_err(|e| format!("cannot clone log file handle: {e:#}"))?;
+
+    let mut cmd = tokio::process::Command::new(current_exe);
+    cmd.arg("daemon")
+        .arg(root)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(log_file))
+        .stderr(std::process::Stdio::from(log_file2))
+        .kill_on_drop(false);
+    #[cfg(unix)]
+    cmd.process_group(0);
+
+    cmd.spawn()
+        .map(|_child| ())
+        .map_err(|e| format!("failed to spawn daemon: {e:#}"))
+}
+
+/// Poll the liveness probe until a daemon answers or `DAEMON_STARTUP_TIMEOUT`
+/// elapses.
+async fn wait_for_daemon_ready(cache_dir: &Path) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + DAEMON_STARTUP_TIMEOUT;
+    loop {
+        if daemon::discovery::probe_liveness(cache_dir).await == daemon::discovery::Liveness::Live
+        {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!(
+                "daemon did not become ready within {DAEMON_STARTUP_TIMEOUT:?} — see {}",
+                daemon::discovery::log_path(cache_dir).display()
+            ));
+        }
+        tokio::time::sleep(DAEMON_POLL_INTERVAL).await;
     }
 }
 

@@ -10,19 +10,19 @@
 //! not run hover, so `construct` is `NULL` until an on-demand query fills it.
 
 use schemars::JsonSchema;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::graph::{Node, Range};
 
 /// LSP `Position` (0-based line, UTF-16 `character`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Position {
     pub line: u32,
     pub character: u32,
 }
 
 /// LSP `Range`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RangeDto {
     pub start: Position,
     pub end: Position,
@@ -51,7 +51,7 @@ fn to_u32(v: i64) -> u32 {
 
 /// A metadata-only symbol node. Code body is deliberately absent — clients that
 /// need source call `read_range` (design principles 1/4).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NodeDto {
     pub fqn: String,
     pub uri: String,
@@ -116,7 +116,7 @@ pub fn kind_label(node_kind: &str, construct: Option<&str>) -> String {
 // framing. `next_cursor` is the opaque encoded [`crate::query::filter::Cursor`].
 
 /// `find_symbol` → a page of metadata nodes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FindSymbolResult {
     pub nodes: Vec<NodeDto>,
     pub next_cursor: Option<String>,
@@ -124,7 +124,7 @@ pub struct FindSymbolResult {
 
 /// `read_range` → the slice of source for `[start, end)` (0-based, exclusive
 /// end line). `total_lines` is the file's full line count (best-effort).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ReadRangeResult {
     pub uri: String,
     pub content: String,
@@ -133,14 +133,14 @@ pub struct ReadRangeResult {
 }
 
 /// `find_definition` → the declaration node(s) for an occurrence.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FindDefinitionResult {
     pub nodes: Vec<NodeDto>,
 }
 
 /// One entry in a `find_references` page: the referencing node and every range
 /// inside it where the target is mentioned.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ReferenceGroup {
     pub node: NodeDto,
     pub sites: Vec<RangeDto>,
@@ -148,7 +148,7 @@ pub struct ReferenceGroup {
 
 /// `find_references` → referencing nodes grouped by their declaration, plus the
 /// continuation cursor.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FindReferencesResult {
     pub references: Vec<ReferenceGroup>,
     pub next_cursor: Option<String>,
@@ -156,7 +156,7 @@ pub struct FindReferencesResult {
 
 /// One entry in a `find_callers`/`find_callees` page: the adjacent callable and
 /// the call-site ranges tying it to the anchor.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct CallGraphNode {
     pub node: NodeDto,
     pub call_sites: Vec<RangeDto>,
@@ -165,7 +165,7 @@ pub struct CallGraphNode {
 /// `find_callers`/`find_callees` → adjacent callables grouped by their
 /// declaration, plus the continuation cursor. The rmcp layer renames `items` to
 /// `callers`/`callees` per the tool contract.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct CallGraphResult {
     pub items: Vec<CallGraphNode>,
     pub next_cursor: Option<String>,

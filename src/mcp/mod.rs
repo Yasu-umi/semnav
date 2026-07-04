@@ -8,6 +8,8 @@
 // `pub(crate)` (not private): the daemon module dispatches to `SemnavServer`'s
 // inherent tool methods directly, so it needs these same input/output DTOs.
 pub(crate) mod dto;
+mod proxy;
 mod server;
 
+pub use proxy::ProxyServer;
 pub use server::SemnavServer;
