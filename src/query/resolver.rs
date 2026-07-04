@@ -29,12 +29,16 @@ impl QueryEngine {
     /// Best-effort `didOpen` so a fresh query-time server has `uri` open before a
     /// positional request. External / unreadable files are silently skipped.
     pub(super) async fn ensure_open<C: LspQueryClient>(&self, uri: &str, client: &C) {
-        let Ok(path) = self.confine(uri) else {
-            return;
-        };
-        if let Ok(text) = tokio::fs::read_to_string(&path).await {
+        if let Some(text) = self.read_file_text(uri).await {
             let _ = client.open_document(uri, &text).await;
         }
+    }
+
+    /// Read `uri`'s current text, confined to the workspace root. `None` for
+    /// an external/unreadable file (mirrors `ensure_open`'s silent skip).
+    pub(super) async fn read_file_text(&self, uri: &str) -> Option<String> {
+        let path = self.confine(uri).ok()?;
+        tokio::fs::read_to_string(&path).await.ok()
     }
 
     /// Resolve a `SymbolRef::At` to the anchor declaration node. With a client we

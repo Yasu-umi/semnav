@@ -249,6 +249,18 @@ fn lsp_status_str(status: LspStatus) -> &'static str {
     }
 }
 
+/// A stale cached result was served immediately while a fresh
+/// materialization runs in the background (`docs/design/lsp-integration.md`
+/// "cache-first + background refresh"; `docs/design/resilience.md`) — a
+/// distinct signal from `degraded` (timeout/unavailable): the server is fine,
+/// the cache is just possibly missing a very recent change. Folded in only
+/// when a refresh was actually kicked off, so this is never serialized as
+/// `refreshing: false`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FreshnessInfo {
+    pub refreshing: bool,
+}
+
 /// `find_definition` response: the domain result plus an optional degradation
 /// annotation, flattened together (field names already match the wire
 /// contract).
@@ -269,41 +281,53 @@ impl From<(FindDefinitionResult, Option<Degradation>)> for FindDefinitionOutput 
     }
 }
 
-/// `find_references` response: see [`FindDefinitionOutput`].
+/// `find_references` response: see [`FindDefinitionOutput`]. Also carries an
+/// optional `refreshing` flag (see [`FreshnessInfo`]) when a warm-cache
+/// answer was served while a background refresh runs.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FindReferencesOutput {
     #[serde(flatten)]
     pub result: FindReferencesResult,
     #[serde(flatten)]
     pub degrade: Option<DegradeInfo>,
+    #[serde(flatten)]
+    pub freshness: Option<FreshnessInfo>,
 }
 
-impl From<(FindReferencesResult, Option<Degradation>)> for FindReferencesOutput {
-    fn from((result, degradation): (FindReferencesResult, Option<Degradation>)) -> Self {
+impl From<(FindReferencesResult, Option<Degradation>, bool)> for FindReferencesOutput {
+    fn from(
+        (result, degradation, refreshing): (FindReferencesResult, Option<Degradation>, bool),
+    ) -> Self {
         FindReferencesOutput {
             result,
             degrade: degradation.map(DegradeInfo::from),
+            freshness: refreshing.then_some(FreshnessInfo { refreshing: true }),
         }
     }
 }
 
 /// `find_callers` response. Domain's `CallGraphResult.items` is renamed to
 /// `callers` on the wire, so this reconstructs fields explicitly rather than
-/// flattening.
+/// flattening. Also carries an optional `refreshing` flag (see
+/// [`FreshnessInfo`]) when a warm-cache answer was served while a background
+/// refresh runs.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FindCallersOutput {
     pub callers: Vec<CallGraphNode>,
     pub next_cursor: Option<String>,
     #[serde(flatten)]
     pub degrade: Option<DegradeInfo>,
+    #[serde(flatten)]
+    pub freshness: Option<FreshnessInfo>,
 }
 
-impl From<(CallGraphResult, Option<Degradation>)> for FindCallersOutput {
-    fn from((result, degradation): (CallGraphResult, Option<Degradation>)) -> Self {
+impl From<(CallGraphResult, Option<Degradation>, bool)> for FindCallersOutput {
+    fn from((result, degradation, refreshing): (CallGraphResult, Option<Degradation>, bool)) -> Self {
         FindCallersOutput {
             callers: result.items,
             next_cursor: result.next_cursor,
             degrade: degradation.map(DegradeInfo::from),
+            freshness: refreshing.then_some(FreshnessInfo { refreshing: true }),
         }
     }
 }
@@ -486,7 +510,7 @@ mod tests {
             items: vec![],
             next_cursor: None,
         };
-        let output: FindCallersOutput = (result, None).into();
+        let output: FindCallersOutput = (result, None, false).into();
         let v = serde_json::to_value(&output).unwrap();
         assert!(v.get("callers").is_some());
         assert!(v.get("items").is_none());

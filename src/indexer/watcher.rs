@@ -183,6 +183,13 @@ impl Actor {
                     debounce = None;
                     let uris: Vec<String> = pending.drain().collect();
                     for uri in uris {
+                        // Watcher yields to live queries (`docs/design/indexing-and-cache.md`):
+                        // defer starting this file's reconcile while a
+                        // foreground query holds the LSP server, so the
+                        // watcher's own `documentSymbol` traffic doesn't
+                        // compound with it. Doesn't preempt a reconcile
+                        // already in flight.
+                        self.query_runtime.wait_until_query_idle().await;
                         if let Err(err) = reconcile_uri(
                             &self.db,
                             &self.query_runtime,

@@ -101,6 +101,41 @@ pub enum DbCommand {
         construct: String,
         reply: oneshot::Sender<Result<()>>,
     },
+    /// Read `anchor_id`'s cached outgoing-callees content hash, if any
+    /// (`docs/design/lsp-integration.md` "callees precise cache").
+    GetCalleesCacheHash {
+        anchor_id: i64,
+        reply: oneshot::Sender<Result<Option<String>>>,
+    },
+    /// Upsert `anchor_id`'s cached outgoing-callees content hash.
+    SetCalleesCacheHash {
+        anchor_id: i64,
+        content_hash: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    /// `true` if `anchor_id` has been materialized at least once for
+    /// `edge_type` (`docs/design/lsp-integration.md` "cache-first + background
+    /// refresh").
+    IsMaterialized {
+        anchor_id: i64,
+        edge_type: String,
+        reply: oneshot::Sender<Result<bool>>,
+    },
+    /// Mark `anchor_id` as materialized for `edge_type`. Idempotent.
+    MarkMaterialized {
+        anchor_id: i64,
+        edge_type: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    /// Invalidate `anchor_id`'s existing outgoing `calls` edges before a
+    /// callees re-materialization (`docs/design/lsp-integration.md` "callees
+    /// precise cache"). `materialize_call_edges` only upserts edges it
+    /// discovers; without this, a callee removed since the last
+    /// materialization would leave a stale, still-`valid` edge behind.
+    InvalidateOutgoingCalls {
+        anchor_id: i64,
+        reply: oneshot::Sender<Result<()>>,
+    },
 }
 
 /// Handle to the db actor. Cheap to clone (just an `mpsc::Sender`).
@@ -186,6 +221,38 @@ impl DbActor {
                     reply,
                 } => {
                     let res = update_node_construct(&conn, id, &construct);
+                    let _ = reply.send(res);
+                }
+                DbCommand::GetCalleesCacheHash { anchor_id, reply } => {
+                    let res = get_callees_cache_hash(&conn, anchor_id);
+                    let _ = reply.send(res);
+                }
+                DbCommand::SetCalleesCacheHash {
+                    anchor_id,
+                    content_hash,
+                    reply,
+                } => {
+                    let res = set_callees_cache_hash(&conn, anchor_id, &content_hash);
+                    let _ = reply.send(res);
+                }
+                DbCommand::IsMaterialized {
+                    anchor_id,
+                    edge_type,
+                    reply,
+                } => {
+                    let res = is_materialized(&conn, anchor_id, &edge_type);
+                    let _ = reply.send(res);
+                }
+                DbCommand::MarkMaterialized {
+                    anchor_id,
+                    edge_type,
+                    reply,
+                } => {
+                    let res = mark_materialized(&conn, anchor_id, &edge_type);
+                    let _ = reply.send(res);
+                }
+                DbCommand::InvalidateOutgoingCalls { anchor_id, reply } => {
+                    let res = invalidate_outgoing_calls(&conn, anchor_id);
                     let _ = reply.send(res);
                 }
             }
@@ -341,6 +408,75 @@ impl DbActor {
             .send(DbCommand::UpdateNodeConstruct {
                 id,
                 construct: construct.to_string(),
+                reply: tx,
+            })
+            .await
+            .map_err(|_| anyhow!("db actor closed"))?;
+        rx.await.map_err(|_| anyhow!("db actor dropped reply"))?
+    }
+
+    /// Read `anchor_id`'s cached outgoing-callees content hash, if any.
+    pub async fn get_callees_cache_hash(&self, anchor_id: i64) -> Result<Option<String>> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbCommand::GetCalleesCacheHash {
+                anchor_id,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| anyhow!("db actor closed"))?;
+        rx.await.map_err(|_| anyhow!("db actor dropped reply"))?
+    }
+
+    /// Upsert `anchor_id`'s cached outgoing-callees content hash.
+    pub async fn set_callees_cache_hash(&self, anchor_id: i64, content_hash: &str) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbCommand::SetCalleesCacheHash {
+                anchor_id,
+                content_hash: content_hash.to_string(),
+                reply: tx,
+            })
+            .await
+            .map_err(|_| anyhow!("db actor closed"))?;
+        rx.await.map_err(|_| anyhow!("db actor dropped reply"))?
+    }
+
+    /// `true` if `anchor_id` has been materialized at least once for `edge_type`.
+    pub async fn is_materialized(&self, anchor_id: i64, edge_type: &str) -> Result<bool> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbCommand::IsMaterialized {
+                anchor_id,
+                edge_type: edge_type.to_string(),
+                reply: tx,
+            })
+            .await
+            .map_err(|_| anyhow!("db actor closed"))?;
+        rx.await.map_err(|_| anyhow!("db actor dropped reply"))?
+    }
+
+    /// Mark `anchor_id` as materialized for `edge_type`. Idempotent.
+    pub async fn mark_materialized(&self, anchor_id: i64, edge_type: &str) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbCommand::MarkMaterialized {
+                anchor_id,
+                edge_type: edge_type.to_string(),
+                reply: tx,
+            })
+            .await
+            .map_err(|_| anyhow!("db actor closed"))?;
+        rx.await.map_err(|_| anyhow!("db actor dropped reply"))?
+    }
+
+    /// Invalidate `anchor_id`'s existing outgoing `calls` edges ahead of a
+    /// callees re-materialization.
+    pub async fn invalidate_outgoing_calls(&self, anchor_id: i64) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbCommand::InvalidateOutgoingCalls {
+                anchor_id,
                 reply: tx,
             })
             .await
@@ -697,6 +833,60 @@ fn update_node_construct(conn: &Connection, id: i64, construct: &str) -> Result<
     Ok(())
 }
 
+const GET_CALLEES_CACHE_SQL: &str = "SELECT content_hash FROM callees_cache WHERE anchor_id = ?1";
+
+fn get_callees_cache_hash(conn: &Connection, anchor_id: i64) -> Result<Option<String>> {
+    let hash = conn
+        .query_row(GET_CALLEES_CACHE_SQL, [anchor_id], |row| {
+            row.get::<_, String>(0)
+        })
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })?;
+    Ok(hash)
+}
+
+const SET_CALLEES_CACHE_SQL: &str = r#"
+    INSERT INTO callees_cache (anchor_id, content_hash) VALUES (?1, ?2)
+    ON CONFLICT(anchor_id) DO UPDATE SET content_hash = excluded.content_hash
+"#;
+
+fn set_callees_cache_hash(conn: &Connection, anchor_id: i64, content_hash: &str) -> Result<()> {
+    conn.execute(SET_CALLEES_CACHE_SQL, params![anchor_id, content_hash])?;
+    Ok(())
+}
+
+const IS_MATERIALIZED_SQL: &str =
+    "SELECT 1 FROM materialized WHERE anchor_id = ?1 AND edge_type = ?2";
+
+fn is_materialized(conn: &Connection, anchor_id: i64, edge_type: &str) -> Result<bool> {
+    let warm = conn
+        .query_row(IS_MATERIALIZED_SQL, params![anchor_id, edge_type], |row| {
+            row.get::<_, i64>(0)
+        })
+        .optional()?
+        .is_some();
+    Ok(warm)
+}
+
+const MARK_MATERIALIZED_SQL: &str =
+    "INSERT OR IGNORE INTO materialized (anchor_id, edge_type) VALUES (?1, ?2)";
+
+fn mark_materialized(conn: &Connection, anchor_id: i64, edge_type: &str) -> Result<()> {
+    conn.execute(MARK_MATERIALIZED_SQL, params![anchor_id, edge_type])?;
+    Ok(())
+}
+
+const INVALIDATE_OUTGOING_CALLS_SQL: &str =
+    "UPDATE edges SET valid = 0 WHERE src_id = ?1 AND edge_type = 'calls'";
+
+fn invalidate_outgoing_calls(conn: &Connection, anchor_id: i64) -> Result<()> {
+    conn.execute(INVALIDATE_OUTGOING_CALLS_SQL, params![anchor_id])?;
+    Ok(())
+}
+
 fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>> {
     let value = conn
         .query_row(
@@ -797,6 +987,15 @@ fn reconcile_file_symbols_tx(
     is_external: bool,
     symbols: &[ReconcileSymbol],
 ) -> Result<ReconcileOutcome> {
+    // The callees cache is keyed on file content, not `signature_hash` (which
+    // under-fires on a same-line-count body edit — see
+    // `docs/design/lsp-integration.md` "callees precise cache"), so every
+    // node in this uri's cache is dropped unconditionally on each reconcile.
+    tx.execute(
+        "DELETE FROM callees_cache WHERE anchor_id IN (SELECT id FROM nodes WHERE uri = ?1)",
+        params![uri],
+    )?;
+
     let old_nodes = nodes_by_uri(tx, uri)?;
     let mut old_used = vec![false; old_nodes.len()];
     let mut assigned: Vec<Option<usize>> = vec![None; symbols.len()];
@@ -1902,5 +2101,119 @@ mod tests {
             .await
             .unwrap();
         assert!(refs.is_empty(), "no references edge exists");
+    }
+
+    // --- callees_cache / materialized (query caching & freshness) ---
+
+    #[tokio::test]
+    async fn callees_cache_hash_roundtrip_and_overwrite() {
+        let dir = tempdir().expect("tempdir");
+        let actor = DbActor::spawn(&dir.path().join("graph.db")).expect("spawn");
+        let id = actor.upsert_node(node_with("app.A", "A", 1)).await.unwrap();
+
+        assert_eq!(actor.get_callees_cache_hash(id).await.unwrap(), None);
+
+        actor.set_callees_cache_hash(id, "hash1").await.unwrap();
+        assert_eq!(
+            actor.get_callees_cache_hash(id).await.unwrap(),
+            Some("hash1".to_string())
+        );
+
+        actor.set_callees_cache_hash(id, "hash2").await.unwrap();
+        assert_eq!(
+            actor.get_callees_cache_hash(id).await.unwrap(),
+            Some("hash2".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_content_change_drops_callees_cache() {
+        let dir = tempdir().expect("tempdir");
+        let actor = DbActor::spawn(&dir.path().join("graph.db")).expect("spawn");
+        let uri = "file:///app/mod.py";
+
+        let mut node = node_with("app.mod.helper", "helper", 1);
+        node.signature_hash = Some("hash1".to_string());
+        let id = actor.upsert_node(node).await.unwrap();
+        actor.set_callees_cache_hash(id, "content1").await.unwrap();
+
+        // A same-line-count body edit: signature_hash changes, so the write
+        // path must drop the callees cache row regardless.
+        actor
+            .reconcile_file_symbols(
+                uri,
+                "python",
+                false,
+                vec![sym(
+                    "app.mod.helper",
+                    "helper",
+                    12,
+                    "function",
+                    1,
+                    "hash2",
+                    None,
+                )],
+            )
+            .await
+            .expect("reconcile");
+
+        assert_eq!(actor.get_callees_cache_hash(id).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn reconcile_unchanged_content_still_drops_callees_cache() {
+        // The DELETE fires unconditionally on every reconcile of a uri, even
+        // when the symbol's `signature_hash` is unchanged — this is what
+        // compensates for `signature_hash` under-firing on a callee-only edit
+        // elsewhere in the same file.
+        let dir = tempdir().expect("tempdir");
+        let actor = DbActor::spawn(&dir.path().join("graph.db")).expect("spawn");
+        let uri = "file:///app/mod.py";
+
+        let mut node = node_with("app.mod.helper", "helper", 1);
+        node.signature_hash = Some("hash1".to_string());
+        let id = actor.upsert_node(node).await.unwrap();
+        actor.set_callees_cache_hash(id, "content1").await.unwrap();
+
+        actor
+            .reconcile_file_symbols(
+                uri,
+                "python",
+                false,
+                vec![sym(
+                    "app.mod.helper",
+                    "helper",
+                    12,
+                    "function",
+                    1,
+                    "hash1",
+                    None,
+                )],
+            )
+            .await
+            .expect("reconcile");
+
+        assert_eq!(actor.get_callees_cache_hash(id).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn materialized_marker_roundtrip_is_per_edge_type() {
+        let dir = tempdir().expect("tempdir");
+        let actor = DbActor::spawn(&dir.path().join("graph.db")).expect("spawn");
+        let id = actor.upsert_node(node_with("app.A", "A", 1)).await.unwrap();
+
+        assert!(!actor.is_materialized(id, "calls").await.unwrap());
+        assert!(!actor.is_materialized(id, "references").await.unwrap());
+
+        actor.mark_materialized(id, "calls").await.unwrap();
+        assert!(actor.is_materialized(id, "calls").await.unwrap());
+        assert!(
+            !actor.is_materialized(id, "references").await.unwrap(),
+            "marking one edge_type must not warm the other"
+        );
+
+        // Idempotent.
+        actor.mark_materialized(id, "calls").await.unwrap();
+        assert!(actor.is_materialized(id, "calls").await.unwrap());
     }
 }

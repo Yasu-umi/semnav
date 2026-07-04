@@ -119,12 +119,14 @@ input  = SymbolRef & Filter & Page
 output = {
   references: [{ node: Node, sites: Range[] }][],   // node=referencing site, sites=reference positions within that same file
   next_cursor?: string,
+  refreshing?: bool,    // true only when a background refresh was kicked off; see resilience.md
 }
 ```
 
 * Origin: `textDocument/references` (`references` edge). Cross-file workspace scan
 * `context.includeDeclaration` is **true** (the declaration itself is included among references)
 * **Can grow large** (for popular symbols) → paginated via Page
+* **Cache-first + background refresh**: a previously-seen anchor is served from the cache immediately, with a fresh materialization running in the background (`refreshing: true`); a first-ever query for an anchor blocks on one materialization instead, so it's never a false empty ([lsp-integration.md](./lsp-integration.md), [resilience.md](./resilience.md))
 
 ### find_callers — call sites of the caller
 
@@ -133,12 +135,14 @@ input  = SymbolRef & Filter & Page
 output = {
   callers: [{ node: Node, call_sites: Range[] }][],   // node=caller, call_sites=positions where the call occurs
   next_cursor?: string,
+  refreshing?: bool,    // true only when a background refresh was kicked off; see resilience.md
 }
 ```
 
 * Origin: `callHierarchy/incomingCalls` (`calls` edge). `fromRanges` becomes `call_sites`
 * **The `calls` edge cannot be built from documentSymbol alone** → built on first use on demand by querying callHierarchy ([lsp-integration.md](./lsp-integration.md))
 * The caller of a module-scope call (`main()`) becomes a `(module)` node (`kind=2`)
+* **Cache-first + background refresh**: same contract as `find_references` above — a warm anchor is served from the cache with `refreshing: true` while a fresh materialization runs in the background; a cold anchor blocks once ([lsp-integration.md](./lsp-integration.md), [resilience.md](./resilience.md))
 
 ### find_callees — call targets
 
@@ -152,6 +156,7 @@ output = {
 
 * Origin: `callHierarchy/outgoingCalls` (`calls` edge)
 * tsserver: `to` sometimes points to the **type-resolved target (an interface method)** → the query side corrects this to the implementing class's method via the `implements` edge ([lsp-integration.md](./lsp-integration.md))
+* **Precise content-hash cache, not cache-first + background refresh**: unlike `find_callers`/`find_references`, the callee list is fully determined by the anchor's own file, so a byte-identical anchor file since the last materialization serves an exact cached answer with no LSP call and no `refreshing` field at all ([lsp-integration.md](./lsp-integration.md))
 
 ### read_range — source body text for a given range
 

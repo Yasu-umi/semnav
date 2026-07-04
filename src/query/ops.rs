@@ -4,6 +4,9 @@
 //! [`LspQueryClient`]; with `None` they serve the materialized cache, with
 //! `Some` they construct edges on demand first.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
 use anyhow::{Result, anyhow};
 
 use crate::adapters::NodeKind;
@@ -214,8 +217,16 @@ impl QueryEngine {
             .await
     }
 
-    /// Find `symref`'s callees (outgoing `calls`). On-demand call hierarchy when
-    /// a client is supplied.
+    /// Find `symref`'s callees (outgoing `calls`) via a precise content-hash
+    /// cache (`docs/design/lsp-integration.md` "callees precise cache"): the
+    /// outgoing callee list of a node depends only on its own file's text, so
+    /// a byte-identical anchor file since the last materialization means the
+    /// cached graph is exact — including the zero-callees case, since the
+    /// write path (`reconcile_file_symbols_tx`) unconditionally drops the
+    /// cache row whenever the anchor's file is reconciled with changed
+    /// content (a same-line-count body edit can change callees without
+    /// changing `signature_hash`, which the ordinary edge invalidation keys
+    /// off). A cache miss falls back to on-demand call hierarchy, as before.
     pub async fn find_callees<C: LspQueryClient>(
         &self,
         symref: &SymbolRef,
@@ -223,8 +234,52 @@ impl QueryEngine {
         page: &Page,
         client: Option<&C>,
     ) -> Result<(CallGraphResult, bool)> {
-        self.call_graph(symref, Direction::Outgoing, filter, page, client)
-            .await
+        let empty = || CallGraphResult {
+            items: Vec::new(),
+            next_cursor: None,
+        };
+        let (anchor_id, mut timed_out) = self.resolve_anchor_id(symref, client).await?;
+        let Some((anchor_id, anchor)) = anchor_id else {
+            return Ok((empty(), timed_out));
+        };
+        if let Some(client) = client {
+            // Read once and reuse for both `didOpen` and the freshness hash,
+            // rather than re-reading via `ensure_open`.
+            let text = self.read_file_text(&anchor.uri).await;
+            if let Some(text) = &text {
+                let _ = client.open_document(&anchor.uri, text).await;
+            }
+            match &text {
+                Some(text) => {
+                    let hash = content_hash(text);
+                    let cached = self.db.get_callees_cache_hash(anchor_id).await?;
+                    if cached.as_deref() != Some(hash.as_str()) {
+                        // `materialize_call_edges` only upserts edges it
+                        // discovers; a callee removed since the last
+                        // materialization needs its stale edge invalidated
+                        // first, or a re-materialization that finds nothing
+                        // would leave it looking valid forever.
+                        self.db.invalidate_outgoing_calls(anchor_id).await?;
+                        timed_out |= self
+                            .materialize_call_edges(anchor_id, &anchor, Direction::Outgoing, client)
+                            .await?;
+                        self.db.set_callees_cache_hash(anchor_id, &hash).await?;
+                    }
+                }
+                // No freshness key for an unreadable/external anchor file —
+                // always materialize (mirrors `ensure_open`'s silent skip).
+                None => {
+                    self.db.invalidate_outgoing_calls(anchor_id).await?;
+                    timed_out |= self
+                        .materialize_call_edges(anchor_id, &anchor, Direction::Outgoing, client)
+                        .await?;
+                }
+            }
+        }
+        let result = self
+            .read_calls_page(anchor_id, Direction::Outgoing, filter, page)
+            .await?;
+        Ok((result, timed_out))
     }
 
     /// Shared callers/callees body: resolve the anchor, optionally materialize
@@ -253,6 +308,21 @@ impl QueryEngine {
                 .materialize_call_edges(anchor_id, &anchor, direction, client)
                 .await?;
         }
+        let result = self.read_calls_page(anchor_id, direction, filter, page).await?;
+        Ok((result, timed_out))
+    }
+
+    /// The `get_neighbors("calls", direction) → group → filter → paginate`
+    /// tail shared by [`Self::call_graph`], [`Self::find_callees`]'s cache hit
+    /// and miss paths, and `QueryRuntime`'s cache-first `find_callers`
+    /// (`callers_from_cache`).
+    async fn read_calls_page(
+        &self,
+        anchor_id: i64,
+        direction: Direction,
+        filter: &Filter,
+        page: &Page,
+    ) -> Result<CallGraphResult> {
         let neighbors = self.db.get_neighbors(anchor_id, "calls", direction).await?;
         let grouped = group_by_node(neighbors);
         let filtered: Vec<_> = grouped
@@ -267,13 +337,66 @@ impl QueryEngine {
                 call_sites: sites.into_iter().map(|s| RangeDto::from(s.range)).collect(),
             })
             .collect();
-        Ok((
-            CallGraphResult {
-                items,
-                next_cursor: next.map(|c| c.encode()),
-            },
-            timed_out,
-        ))
+        Ok(CallGraphResult {
+            items,
+            next_cursor: next.map(|c| c.encode()),
+        })
+    }
+
+    /// Cache-only read of `symref`'s callers (incoming `calls`), for
+    /// `QueryRuntime`'s warm path (`docs/design/lsp-integration.md`
+    /// "cache-first + background refresh") — no LSP call, however stale.
+    pub async fn callers_from_cache(
+        &self,
+        anchor_id: i64,
+        filter: &Filter,
+        page: &Page,
+    ) -> Result<CallGraphResult> {
+        self.read_calls_page(anchor_id, Direction::Incoming, filter, page)
+            .await
+    }
+
+    /// Cache-only read of `symref`'s references, mirroring
+    /// [`Self::callers_from_cache`].
+    pub async fn references_from_cache(
+        &self,
+        anchor_id: i64,
+        filter: &Filter,
+        page: &Page,
+    ) -> Result<FindReferencesResult> {
+        let neighbors = self
+            .db
+            .get_neighbors(anchor_id, "references", Direction::Incoming)
+            .await?;
+        let grouped = group_by_node(neighbors);
+        let filtered: Vec<_> = grouped
+            .into_iter()
+            .filter(|(n, _)| filter.matches(n))
+            .collect();
+        let (page_items, next) = paginate(filtered, page, |(n, _)| SortKey::from_node(n));
+        let references = page_items
+            .into_iter()
+            .map(|(node, sites)| ReferenceGroup {
+                node: NodeDto::from_node(&node),
+                sites: sites.into_iter().map(|s| RangeDto::from(s.range)).collect(),
+            })
+            .collect();
+        Ok(FindReferencesResult {
+            references,
+            next_cursor: next.map(|c| c.encode()),
+        })
+    }
+
+    /// Thin wrapper over [`Self::resolve_anchor_id`], exposed so
+    /// `QueryRuntime` can resolve the anchor once and then independently
+    /// decide "read cache now" vs. "materialize in background"
+    /// (`docs/design/lsp-integration.md` "cache-first + background refresh").
+    pub async fn resolve_anchor<C: LspQueryClient>(
+        &self,
+        symref: &SymbolRef,
+        client: Option<&C>,
+    ) -> Result<(Option<(i64, crate::graph::Node)>, bool)> {
+        self.resolve_anchor_id(symref, client).await
     }
 
     /// Resolve `symref` to `(id, node)`. `Fqn` ⇒ direct lookup; `At` ⇒
@@ -309,6 +432,17 @@ impl QueryEngine {
             timed_out,
         ))
     }
+}
+
+/// Content fingerprint for the callees precise cache — a plain hash of the
+/// anchor file's full text. Deliberately distinct from `signature_hash`
+/// (`src/indexer/symbol.rs`), which hashes symbol structure, not file bytes,
+/// and under-fires on a same-line-count body edit
+/// (`docs/design/lsp-integration.md` "callees precise cache").
+fn content_hash(text: &str) -> String {
+    let mut h = DefaultHasher::new();
+    text.hash(&mut h);
+    format!("{:016x}", h.finish())
 }
 
 #[cfg(test)]
@@ -857,6 +991,171 @@ mod tests {
         assert_eq!(res.items[0].node.fqn, "repo.helper");
         assert_eq!(res.items[0].call_sites[0].start.line, 7);
         assert!(!timed_out);
+    }
+
+    // --- §5.A: find_callees precise content-hash cache ---
+    //
+    // Unlike `scenario()` (whose files are never written to disk),
+    // `find_callees`'s cache hashes the anchor's real file text, so these
+    // tests need an actual on-disk file to edit between calls.
+
+    fn node_at(uri: &str, fqn: &str, name: &str, line: i64) -> crate::graph::Node {
+        let mut n = func(fqn, name, line);
+        n.uri = uri.to_string();
+        n
+    }
+
+    /// A real on-disk `helper`/`caller` file (`caller` calls `helper` on line
+    /// 4), a matching engine, and a mock wired for one `prepareCallHierarchy`
+    /// / `outgoingCalls` round trip. The backing tempdir is leaked so the file
+    /// outlives the test.
+    async fn callees_cache_scenario()
+    -> (QueryEngine, MockLspQueryClient, SymbolRef, std::path::PathBuf) {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mod.py");
+        fs::write(
+            &path,
+            "def helper():\n    return 1\n\ndef caller():\n    return helper()\n",
+        )
+        .unwrap();
+        let uri = format!("file://{}", path.display());
+        let root_uri = format!("file://{}", dir.path().display());
+        let db = crate::graph::DbActor::spawn(&dir.path().join("g.db")).unwrap();
+        std::mem::forget(dir);
+        let engine = QueryEngine::new(db, root_uri);
+
+        engine
+            .db()
+            .upsert_node(node_at(&uri, "repo.helper", "helper", 0))
+            .await
+            .unwrap();
+        engine
+            .db()
+            .upsert_node(node_at(&uri, "repo.caller", "caller", 3))
+            .await
+            .unwrap();
+
+        let helper_item = CallHierarchyItem {
+            name: "helper".into(),
+            kind: 12,
+            uri: uri.clone(),
+            range: rng(0, 0, 2, 0),
+            selection_range: rng(0, 4, 0, 10),
+            raw: json!({ "uri": uri, "name": "helper", "data": "h" }),
+        };
+        let caller_item = CallHierarchyItem {
+            name: "caller".into(),
+            kind: 12,
+            uri: uri.clone(),
+            range: rng(3, 0, 5, 0),
+            selection_range: rng(3, 4, 3, 10),
+            raw: json!({ "uri": uri, "name": "caller", "data": "c" }),
+        };
+        let mut mock = MockLspQueryClient::new();
+        mock.prepare
+            .insert((uri.clone(), 3, 4), vec![caller_item.clone()]);
+        mock.outgoing.insert(
+            caller_item.key(),
+            vec![OutgoingCall {
+                to: helper_item,
+                from_ranges: vec![rng(4, 11, 4, 17)],
+            }],
+        );
+
+        (
+            engine,
+            mock,
+            SymbolRef::Fqn("repo.caller".into()),
+            path,
+        )
+    }
+
+    #[tokio::test]
+    async fn find_callees_precise_cache_skips_lsp_when_file_unchanged() {
+        let (engine, mock, symref, _path) = callees_cache_scenario().await;
+
+        let (first, timed_out) = engine
+            .find_callees(&symref, &Filter::default(), &Page::default(), Some(&mock))
+            .await
+            .unwrap();
+        assert_eq!(first.items.len(), 1);
+        assert_eq!(first.items[0].node.fqn, "repo.helper");
+        assert!(!timed_out);
+        assert_eq!(mock.call_count("prepareCallHierarchy"), 1);
+
+        let (second, timed_out) = engine
+            .find_callees(&symref, &Filter::default(), &Page::default(), Some(&mock))
+            .await
+            .unwrap();
+        assert_eq!(second.items.len(), 1);
+        assert!(!timed_out);
+        assert_eq!(
+            mock.call_count("prepareCallHierarchy"),
+            1,
+            "unchanged file must be served from the cache, not re-hit the LSP"
+        );
+    }
+
+    #[tokio::test]
+    async fn find_callees_precise_cache_remateralizes_on_same_line_count_body_edit() {
+        let (engine, mut mock, symref, path) = callees_cache_scenario().await;
+
+        let (first, _) = engine
+            .find_callees(&symref, &Filter::default(), &Page::default(), Some(&mock))
+            .await
+            .unwrap();
+        assert_eq!(first.items.len(), 1);
+        assert_eq!(mock.call_count("prepareCallHierarchy"), 1);
+
+        // Same line count as the original (`return helper()` -> `return 0`):
+        // `caller`'s own declaration span/kind/detail are untouched, so a
+        // `signature_hash`-gated invalidation would miss this — the trap the
+        // content-hash cache exists to close.
+        fs::write(
+            &path,
+            "def helper():\n    return 1\n\ndef caller():\n    return 0\n",
+        )
+        .unwrap();
+        mock.outgoing.clear();
+
+        let (second, _) = engine
+            .find_callees(&symref, &Filter::default(), &Page::default(), Some(&mock))
+            .await
+            .unwrap();
+        assert!(
+            second.items.is_empty(),
+            "the callee was removed by the edit"
+        );
+        assert_eq!(
+            mock.call_count("prepareCallHierarchy"),
+            2,
+            "changed file content must re-hit the LSP"
+        );
+    }
+
+    #[tokio::test]
+    async fn find_callees_zero_callees_is_served_from_cache_without_lsp() {
+        let (engine, mut mock, symref, _path) = callees_cache_scenario().await;
+        // No outgoing calls programmed for `caller` at all.
+        mock.outgoing.clear();
+
+        let (first, _) = engine
+            .find_callees(&symref, &Filter::default(), &Page::default(), Some(&mock))
+            .await
+            .unwrap();
+        assert!(first.items.is_empty());
+        assert_eq!(mock.call_count("prepareCallHierarchy"), 1);
+
+        let (second, _) = engine
+            .find_callees(&symref, &Filter::default(), &Page::default(), Some(&mock))
+            .await
+            .unwrap();
+        assert!(second.items.is_empty());
+        assert_eq!(
+            mock.call_count("prepareCallHierarchy"),
+            1,
+            "an authoritative zero-callees result must be cached, not re-fetched"
+        );
     }
 
     #[tokio::test]

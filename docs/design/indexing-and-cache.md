@@ -58,6 +58,16 @@ Both servers negotiate `textDocumentSync=2` (Incremental), but the Graph side do
 
 Using `publishDiagnostics` as a completion signal is **not viable** (it fans out beyond the changed file / pyright emits a two-stage clear→final / tsserver emits zero notifications for a clean→clean transition). Given this, the "re-query the LSP on the next query" step in the flow above may be performed immediately after didChange.
 
+### Query-time caching tables (`callees_cache` / `materialized`)
+
+Two side tables (`migrations/V0002__callees_cache.sql`) support query-time caching without touching the `nodes`/`edges` column lists (see [lsp-integration.md](./lsp-integration.md) "Query-time caching and freshness" for the read-path behavior these support):
+
+* **`callees_cache(anchor_id, content_hash)`** — the `find_callees` precise cache's freshness key: a hash of the anchor file's text at the time its outgoing `calls` edges were last materialized. Reconciling a file (`reconcile_file_symbols_tx`) unconditionally drops every `callees_cache` row for that file's nodes, regardless of whether any individual symbol's `signature_hash` changed.
+
+  This unconditional drop matters because `signature_hash` (`signature_fingerprint` in `src/indexer/symbol.rs`) hashes `name + kind + detail + range span + sel span` — **not** the function body. A same-line-count body edit (`foo()` → `bar()`) changes none of those, so the enclosing node reads as "unchanged" under the ordinary rename/hash-change invalidation (`INVALIDATE_EDGES_SQL`, above) and its `calls` edges are **not** invalidated by that path. A `calls` edge staying `valid=1` therefore does not imply its callee list is current — the callees cache exists precisely to close this gap with a real file-content signal instead of trusting `valid` alone.
+
+* **`materialized(anchor_id, edge_type)`** — presence of a row means `anchor_id` has been materialized at least once for `edge_type` (`"calls"` incoming, or `"references"`). This is the warm/cold marker for `find_callers`/`find_references`'s cache-first + background refresh; it is never cleared (warm never reverts to cold — staleness is handled by the background refresh, not by invalidating the marker).
+
 ### Orphan Reclamation
 
 Old symbols that could not be re-linked by rename tracking ([Stable Symbol ID Rename Tracking](./graph-model.md#rename-tracking)) become `orphan=true`. Deletion happens via a **two-strike grace period based solely on the `orphan` flag** (the `generation` column is reserved for future multi-stage tuning but is unused in 0.0.1 — always 0). Time-based TTL is not used (to prevent a mass deletion sweep from firing immediately after startup, since only the clock advances while the Graph process is stopped).

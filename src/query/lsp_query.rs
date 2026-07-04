@@ -14,6 +14,8 @@
 //!   is flattened to a single text blob.
 
 #[cfg(test)]
+use std::cell::RefCell;
+#[cfg(test)]
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::time::Duration;
@@ -518,6 +520,9 @@ pub struct MockLspQueryClient {
     pub outgoing: HashMap<ItemKey, Vec<OutgoingCall>>,
     pub hovers: HashMap<PosKey, Option<Hover>>,
     pub timeout_ops: HashSet<&'static str>,
+    /// Per-operation call counter, so a test can assert an LSP round trip
+    /// was (or wasn't) made — e.g. a cache hit that must skip the server.
+    pub call_counts: RefCell<HashMap<&'static str, u32>>,
 }
 
 #[cfg(test)]
@@ -532,6 +537,15 @@ impl MockLspQueryClient {
             deadline: Duration::from_secs(0),
         })
     }
+
+    fn record_call(&self, op: &'static str) {
+        *self.call_counts.borrow_mut().entry(op).or_insert(0) += 1;
+    }
+
+    /// Number of times `op` was called (0 if never).
+    pub fn call_count(&self, op: &'static str) -> u32 {
+        self.call_counts.borrow().get(op).copied().unwrap_or(0)
+    }
 }
 
 // Mirrors the crate-wide RPITIT style (`-> impl Future + Send`, not `async fn`;
@@ -540,6 +554,7 @@ impl MockLspQueryClient {
 #[allow(clippy::manual_async_fn)]
 impl LspQueryClient for MockLspQueryClient {
     fn open_document(&self, _uri: &str, _text: &str) -> impl Future<Output = Result<()>> + Send {
+        self.record_call("didOpen");
         async { Ok(()) }
     }
 
@@ -549,6 +564,7 @@ impl LspQueryClient for MockLspQueryClient {
         line: u32,
         character: u32,
     ) -> impl Future<Output = Result<Vec<Location>>> + Send {
+        self.record_call("definition");
         let timed_out = self.timeout_ops.contains("definition");
         let out = self
             .definitions
@@ -570,6 +586,7 @@ impl LspQueryClient for MockLspQueryClient {
         character: u32,
         _include_declaration: bool,
     ) -> impl Future<Output = Result<Vec<Location>>> + Send {
+        self.record_call("references");
         let timed_out = self.timeout_ops.contains("references");
         let out = self
             .references
@@ -590,6 +607,7 @@ impl LspQueryClient for MockLspQueryClient {
         line: u32,
         character: u32,
     ) -> impl Future<Output = Result<Vec<CallHierarchyItem>>> + Send {
+        self.record_call("prepareCallHierarchy");
         let timed_out = self.timeout_ops.contains("prepareCallHierarchy");
         let out = self
             .prepare
@@ -608,6 +626,7 @@ impl LspQueryClient for MockLspQueryClient {
         &self,
         item: &CallHierarchyItem,
     ) -> impl Future<Output = Result<Vec<IncomingCall>>> + Send {
+        self.record_call("incomingCalls");
         let timed_out = self.timeout_ops.contains("incomingCalls");
         let out = self.incoming.get(&item.key()).cloned().unwrap_or_default();
         async move {
@@ -622,6 +641,7 @@ impl LspQueryClient for MockLspQueryClient {
         &self,
         item: &CallHierarchyItem,
     ) -> impl Future<Output = Result<Vec<OutgoingCall>>> + Send {
+        self.record_call("outgoingCalls");
         let timed_out = self.timeout_ops.contains("outgoingCalls");
         let out = self.outgoing.get(&item.key()).cloned().unwrap_or_default();
         async move {
@@ -638,6 +658,7 @@ impl LspQueryClient for MockLspQueryClient {
         line: u32,
         character: u32,
     ) -> impl Future<Output = Result<Option<Hover>>> + Send {
+        self.record_call("hover");
         let out = self
             .hovers
             .get(&(uri.to_string(), line, character))

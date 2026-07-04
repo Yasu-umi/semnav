@@ -42,6 +42,12 @@ use crate::indexer::uri_to_path;
 /// client by reference (`None` reads only already-materialized edges). Engine
 /// methods never spawn servers themselves — the caller (Step 6 rmcp layer, via
 /// the supervisor pool) acquires a per-language client and passes it in.
+///
+/// `Clone` is cheap (an `mpsc::Sender` clone plus a `String` clone) — `Clone`
+/// so `QueryRuntime` can hand a detached background refresh
+/// (`docs/design/lsp-integration.md` "cache-first + background refresh") its
+/// own owned handle rather than a borrow tied to the foreground call's stack.
+#[derive(Clone)]
 pub struct QueryEngine {
     db: DbActor,
     root_uri: String,

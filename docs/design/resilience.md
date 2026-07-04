@@ -58,6 +58,21 @@ LSP-dependent, on-demand edge tools (find_definition / find_references / find_ca
   * `lsp_timeout` — response timed out
   * `lsp_partial` — only some methods failed (e.g. pyright's `implementation` is unsupported, but that's a spec limitation, not a failure, so it's a normal response)
 
+## `refreshing` — distinct from `degraded`
+
+`find_callers`/`find_references` additionally carry an optional `refreshing: true` field, folded in only when a background refresh was actually kicked off (never serialized as `refreshing: false`):
+
+```
+{
+  ...(normal fields: callers / references / next_cursor),
+  refreshing: true,
+}
+```
+
+This is **not** a degradation signal in the sense of "the server is unhealthy" — a warm anchor's server is up and being used right now. It means the anchor was *warm* (materialized before): the result was served immediately from the cache while a fresh materialization runs in the background ([lsp-integration.md](./lsp-integration.md) "cache-first + background refresh"), so it may be missing a caller/reference added since the last materialization. Re-querying picks up the converged answer once the background refresh completes. `find_definition`/`find_symbol`/`find_callees` never set this field — `find_callees` uses a precise content-hash cache instead ([lsp-integration.md](./lsp-integration.md)), so its cached answer needs no freshness signal at all.
+
+`degraded` and `refreshing` are independent signals and can, in a narrow edge case, both be set: for a `{at: ...}` symbol ref, anchor resolution itself is a `textDocument/definition` call that can time out (`degrade_reason: "lsp_timeout"`) while still falling back to the indexed node at that position; if *that* anchor happens to be warm, a background refresh is still spawned. `degraded` here describes the anchor-resolution step, not the cached answer's freshness.
+
 ### Agent experience in degraded mode
 
 By seeing `degraded: true`, the agent knows the result is limited by the cache. It can distinguish "callers/callees are few because of degradation" from "genuinely few," and, when needed, has the fallback of reading code directly via `read_range` (which is LSP-independent and always works).

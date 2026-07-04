@@ -92,6 +92,30 @@ Both servers negotiate `InitializeResult.capabilities.textDocumentSync = 2` (Inc
 4. **Multiple resolutions**: when definition returns multiple `Location`s (e.g. overloads) → this becomes edge multiplicity. Node uniqueness is guaranteed by `uri + selectionRange`.
 5. **The SymbolKind trap (TS)**: a `type` alias has `kind=13` (the same as Variable). `construct=type` is extracted via hover and promoted to `NodeKind::Custom("TypeAlias")` ([hover-based refinement in language-adapters.md](./language-adapters.md#refinement-via-hover)).
 
+## Query-time caching and freshness
+
+On-demand edge construction (above) means every `find_references`/`find_callers`/`find_callees` call can potentially pay a live LSP round trip. Two distinct caching strategies close that gap, split by whether the relation's freshness key is cheap to check:
+
+### `find_callees` — precise content-hash cache
+
+The outgoing callee list of a node depends only on that node's own file text, so a single-file content hash is a sufficient, *exact* freshness key: `callees_cache(anchor_id, content_hash)` records the anchor file's text hash at the time its callees were last materialized. A query hashes the anchor's current file text and compares; on a match, the graph is served straight from `edges` with no LSP call — correct even when the callee list is empty, since the write path (`reconcile_file_symbols_tx`, [indexing-and-cache.md](./indexing-and-cache.md)) drops the cache row on every reconcile of that file, regardless of whether `signature_hash` changed.
+
+Because `materialize_call_edges` only upserts the edges callHierarchy reports (it doesn't know what to remove), a cache miss first invalidates the anchor's existing outgoing `calls` edges before re-materializing — otherwise a callee removed since the last materialization would leave a stale, still-`valid` edge behind.
+
+### `find_callers` / `find_references` — cache-first + background refresh
+
+Unlike callees, an incoming relation (who calls/references this anchor) can change from *any* file in the workspace without touching the anchor's own file — there is no cheap per-node freshness key. Instead:
+
+* A `materialized(anchor_id, edge_type)` marker records whether the anchor has ever been materialized for `"calls"` (incoming) or `"references"`.
+* **Cold** (no marker row): blocks on one materialization, same as before, then records the marker.
+* **Warm** (marker present): the cached graph is served immediately (a DB read, not an LSP round trip), and a detached background task re-materializes so the *next* query is fresh. The response carries `refreshing: true` ([resilience.md](./resilience.md)) so the caller knows to re-query for the converged answer.
+
+This is deliberately asymmetric with the "never lie with an empty result" invariant: a cold anchor's empty cache is indistinguishable from "nobody calls this," so cold always blocks; a warm anchor can only be stale in the "missing a newly-added caller" direction, converging on the next query, which is far less dangerous than a false negative on a navigation tool.
+
+### Watcher yields to live queries
+
+The FS watcher's reconcile loop and a live query can both want the same language server at once. Rather than a priority queue (the reconcile loop already holds at most one in-flight `documentSymbol` request — see [indexing-and-cache.md](./indexing-and-cache.md)), `QueryRuntime` tracks an in-flight count of foreground LSP-touching queries (`find_references`/`find_callers`/`find_callees`, and `find_definition`'s `at`-position path). The watcher awaits the count reaching zero before *starting* its next per-file reconcile, so a live query isn't taxed by concurrent `documentSymbol` traffic saturating the server. It cannot preempt a reconcile already in flight, and background refreshes (above) deliberately don't hold this gate — they're best-effort load, not live queries, and holding it would let a stream of warm queries starve the watcher.
+
 ## Reproducing the live verification
 
 The probes remain under `/tmp` (re-runnable):
