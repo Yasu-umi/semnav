@@ -353,6 +353,10 @@ fn apply_pragmas(conn: &Connection) -> Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
+    // A second process touching this file (e.g. a `semnav index` re-run
+    // while a `serve`/`daemon` process still holds it) retries on lock
+    // contention for 5s instead of failing immediately with SQLITE_BUSY.
+    conn.pragma_update(None, "busy_timeout", 5000)?;
     Ok(())
 }
 
@@ -979,6 +983,16 @@ mod tests {
     use super::*;
     use crate::graph::Site;
     use tempfile::tempdir;
+
+    #[test]
+    fn apply_pragmas_sets_busy_timeout() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pragmas(&conn).unwrap();
+        let busy_timeout: i64 = conn
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .unwrap();
+        assert_eq!(busy_timeout, 5000);
+    }
 
     fn sample_node(fqn: &str) -> Node {
         Node {

@@ -60,7 +60,14 @@ impl ServerProcess {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            .stderr(Stdio::inherit())
+            // Backstop against orphaning this child if its owning `Child`
+            // handle is ever dropped without being reaped (e.g. the
+            // exit-watch task unwinding on a panic, or the runtime shutting
+            // down mid-task) — the graceful paths (`shutdown`, `wait_exit`)
+            // already consume the `Child` themselves, so this only fires on
+            // the abnormal path.
+            .kill_on_drop(true);
 
         let mut child = command
             .spawn()
