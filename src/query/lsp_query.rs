@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 use tokio::time::timeout;
 
 use crate::indexer::LspRange;
-use crate::lsp::{LspClient, QUERY_TIMEOUT};
+use crate::lsp::{LspClient, query_timeout_from_env};
 
 /// A normalized LSP `Location` (`uri` + `range`).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -150,9 +150,9 @@ pub trait LspQueryClient {
     ) -> impl Future<Output = Result<Option<Hover>>> + Send;
 }
 
-/// Real client over a live [`LspClient`], enforcing [`QUERY_TIMEOUT`] per
-/// round-trip. `language_id` is the didOpen language id; one client serves one
-/// language's server (mirrors `LspSymbolFetcher`).
+/// Real client over a live [`LspClient`], enforcing [`query_timeout_from_env`]
+/// per round-trip. `language_id` is the didOpen language id; one client serves
+/// one language's server (mirrors `LspSymbolFetcher`).
 pub struct ClientLspQueryClient<'a> {
     client: &'a LspClient,
     timeout: Duration,
@@ -321,10 +321,10 @@ impl LspQueryClient for ClientLspQueryClient<'_> {
     }
 }
 
-/// Default query-time client bound to [`QUERY_TIMEOUT`].
+/// Default query-time client bound to [`query_timeout_from_env`].
 impl<'a> ClientLspQueryClient<'a> {
     pub fn with_default_timeout(client: &'a LspClient, language_id: &'a str) -> Self {
-        Self::new(client, QUERY_TIMEOUT, language_id)
+        Self::new(client, query_timeout_from_env(), language_id)
     }
 }
 

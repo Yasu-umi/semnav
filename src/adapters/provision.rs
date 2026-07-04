@@ -57,6 +57,31 @@ fn build_command(spec: CommandSpec, program: &str) -> Command {
     cmd
 }
 
+/// `SEMNAV_LSP_<LANG>_COMMAND` if set — an absolute path or `PATH`-resolvable
+/// name that replaces the adapter's built-in program entirely, bypassing
+/// `PATH`/isolated-install resolution (the caller is trusted to know it's
+/// runnable). `<LANG>` is `language_name()` upper-cased, e.g. `RUST` for the
+/// Rust adapter (`docs/design/language-adapters.md`).
+fn command_override_from_env(language_name: &str) -> Option<String> {
+    std::env::var(format!(
+        "SEMNAV_LSP_{}_COMMAND",
+        language_name.to_uppercase()
+    ))
+    .ok()
+    .filter(|s| !s.is_empty())
+}
+
+/// `SEMNAV_LSP_<LANG>_ARGS` if set — extra args appended after the adapter's
+/// built-in `CommandSpec::args` (e.g. `SEMNAV_LSP_RUST_ARGS="--log-file /tmp/ra.log"`
+/// for rust-analyzer startup options). Split on whitespace; no shell-quoting
+/// support in this first cut.
+fn extra_args_from_env(language_name: &str) -> Vec<String> {
+    std::env::var(format!("SEMNAV_LSP_{}_ARGS", language_name.to_uppercase()))
+        .ok()
+        .map(|s| s.split_whitespace().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
 /// Fail fast with an install hint if the Node.js/npm runtime semnav rides on is absent.
 fn require_runtime(program: &str) -> Result<()> {
     if which::which("node").is_err() {
@@ -112,36 +137,48 @@ async fn npm_install(pkg: &ServerPackage, servers_dir: &Path, program: &str) -> 
 
 /// Provision (or reuse) the language server for `adapter` and return a ready-to-spawn
 /// [`Command`] with its `--stdio` (etc.) args already applied.
+///
+/// `SEMNAV_LSP_<LANG>_COMMAND` (see [`command_override_from_env`]) short-circuits
+/// resolution entirely — set it to point at a custom build, a wrapper script, or
+/// a server semnav has no built-in adapter's exact match for. `SEMNAV_LSP_<LANG>_ARGS`
+/// (see [`extra_args_from_env`]) appends extra startup args regardless of how the
+/// program was resolved.
 pub async fn provision(adapter: &dyn LanguageAdapter, ctx: &ProvisionContext) -> Result<Command> {
     let spec = adapter.server_command();
-    let resolved = resolve_binary(spec.program, &ctx.servers_dir);
-    let program = match resolved {
-        Resolved::OnPath => spec.program.to_string(),
-        Resolved::Isolated(path) => path.to_string_lossy().into_owned(),
-        Resolved::NeedsInstall => match adapter.server_package() {
-            Some(pkg) => {
-                npm_install(&pkg, &ctx.servers_dir, spec.program).await?;
-                let path = isolated_bin(&ctx.servers_dir, spec.program);
-                if !path.exists() {
-                    bail!(
-                        "npm install completed but {} was not created; the `{}` package may \
-                         not provide the `{}` binary",
-                        path.display(),
-                        pkg.npm_package,
-                        spec.program
-                    );
+    let language_name = adapter.language_name();
+    let program = match command_override_from_env(language_name) {
+        Some(program) => program,
+        None => match resolve_binary(spec.program, &ctx.servers_dir) {
+            Resolved::OnPath => spec.program.to_string(),
+            Resolved::Isolated(path) => path.to_string_lossy().into_owned(),
+            Resolved::NeedsInstall => match adapter.server_package() {
+                Some(pkg) => {
+                    npm_install(&pkg, &ctx.servers_dir, spec.program).await?;
+                    let path = isolated_bin(&ctx.servers_dir, spec.program);
+                    if !path.exists() {
+                        bail!(
+                            "npm install completed but {} was not created; the `{}` package may \
+                             not provide the `{}` binary",
+                            path.display(),
+                            pkg.npm_package,
+                            spec.program
+                        );
+                    }
+                    path.to_string_lossy().into_owned()
                 }
-                path.to_string_lossy().into_owned()
-            }
-            None => bail!(
-                "`{program}` not found on PATH; this language server isn't auto-installable \
-                 — install it manually (e.g. `rustup component add rust-analyzer`) and ensure \
-                 it's on PATH",
-                program = spec.program,
-            ),
+                None => bail!(
+                    "`{program}` not found on PATH; this language server isn't auto-installable \
+                     — install it manually (e.g. `rustup component add rust-analyzer`), ensure \
+                     it's on PATH, or set SEMNAV_LSP_{lang_upper}_COMMAND to its path",
+                    program = spec.program,
+                    lang_upper = language_name.to_uppercase(),
+                ),
+            },
         },
     };
-    Ok(build_command(spec, &program))
+    let mut cmd = build_command(spec, &program);
+    cmd.args(extra_args_from_env(language_name));
+    Ok(cmd)
 }
 
 #[cfg(test)]
@@ -198,5 +235,44 @@ mod tests {
         );
         let args: Vec<&std::ffi::OsStr> = std_cmd.get_args().collect();
         assert_eq!(args, vec![std::ffi::OsStr::new("--stdio")]);
+    }
+
+    // One test per var, set→check→cleanup within the same test function — see
+    // `daemon/server.rs::idle_timeout_from_env_defaults_when_unset_and_parses_override`
+    // for why (env vars are global process state, racy across parallel tests
+    // if split across functions touching the same var).
+    #[test]
+    fn command_override_from_env_reads_uppercased_lang_var() {
+        unsafe { std::env::remove_var("SEMNAV_LSP_TESTLANG_COMMAND") };
+        assert_eq!(command_override_from_env("testlang"), None);
+
+        unsafe { std::env::set_var("SEMNAV_LSP_TESTLANG_COMMAND", "/custom/lsp") };
+        assert_eq!(
+            command_override_from_env("testlang"),
+            Some("/custom/lsp".to_string())
+        );
+
+        unsafe { std::env::set_var("SEMNAV_LSP_TESTLANG_COMMAND", "") };
+        assert_eq!(
+            command_override_from_env("testlang"),
+            None,
+            "empty override is treated as unset"
+        );
+
+        unsafe { std::env::remove_var("SEMNAV_LSP_TESTLANG_COMMAND") };
+    }
+
+    #[test]
+    fn extra_args_from_env_splits_on_whitespace() {
+        unsafe { std::env::remove_var("SEMNAV_LSP_TESTLANG_ARGS") };
+        assert_eq!(extra_args_from_env("testlang"), Vec::<String>::new());
+
+        unsafe { std::env::set_var("SEMNAV_LSP_TESTLANG_ARGS", "--log-file /tmp/x.log") };
+        assert_eq!(
+            extra_args_from_env("testlang"),
+            vec!["--log-file".to_string(), "/tmp/x.log".to_string()]
+        );
+
+        unsafe { std::env::remove_var("SEMNAV_LSP_TESTLANG_ARGS") };
     }
 }

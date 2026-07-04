@@ -14,7 +14,8 @@ mod transport;
 
 pub use client::LspClient;
 pub use handshake::{
-    DOCUMENT_SYMBOL_TIMEOUT, INITIALIZE_TIMEOUT, QUERY_TIMEOUT, build_initialize_params, initialize,
+    build_initialize_params, document_symbol_timeout_from_env, initialize,
+    initialize_timeout_from_env, query_timeout_from_env,
 };
 pub use server::{SHUTDOWN_GRACE, ServerExit, ServerProcess};
 pub use supervisor::{

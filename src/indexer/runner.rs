@@ -12,7 +12,8 @@ use crate::adapters::adapter_for_language;
 use crate::graph::DbActor;
 use crate::indexer::{IndexStats, LspSymbolFetcher, index_repository};
 use crate::lsp::{
-    DOCUMENT_SYMBOL_TIMEOUT, FailureKind, RealServerFactory, RestartPolicy, ServerSupervisor,
+    FailureKind, RealServerFactory, RestartPolicy, ServerSupervisor,
+    document_symbol_timeout_from_env,
 };
 
 /// Drive the LSP server for `language` through its supervisor, indexing its
@@ -53,7 +54,7 @@ pub async fn index_language(
         )
     })?;
 
-    let fetcher = LspSymbolFetcher::new(&client, DOCUMENT_SYMBOL_TIMEOUT, language);
+    let fetcher = LspSymbolFetcher::new(&client, document_symbol_timeout_from_env(), language);
     match index_repository(db, &fetcher, root_uri, language).await {
         Ok(stats) => {
             let _ = sup.shutdown().await;

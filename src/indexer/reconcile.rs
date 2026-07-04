@@ -14,7 +14,7 @@ use crate::indexer::{
     FlatSymbol, flatten_document_symbols, module_path_from_uri, request_document_symbols,
     signature_fingerprint, uri_to_path,
 };
-use crate::lsp::DOCUMENT_SYMBOL_TIMEOUT;
+use crate::lsp::document_symbol_timeout_from_env;
 use crate::query::QueryRuntime;
 
 /// Reconcile one uri's nodes against its current on-disk content. A missing
@@ -46,7 +46,8 @@ pub(crate) async fn reconcile_uri(
 
     client.ensure_document(uri, language, &text).await?;
 
-    let symbols = request_document_symbols(&client, uri, DOCUMENT_SYMBOL_TIMEOUT).await?;
+    let symbols =
+        request_document_symbols(&client, uri, document_symbol_timeout_from_env()).await?;
     let module_path = module_path_from_uri(uri, root_uri);
     let mut flat = flatten_document_symbols(&symbols, &module_path);
     if file_exists {

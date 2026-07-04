@@ -39,9 +39,10 @@ fn print_help() {
     eprintln!("semnav 0.0.1 — LSP-backed Semantic Graph MCP server");
     eprintln!();
     eprintln!("usage:");
-    eprintln!("  semnav discover <root>   list source files (Python/TS) under <root>");
+    eprintln!("  semnav discover <root>   list source files (Python/TS/Rust) under <root>");
     eprintln!("  semnav index <root>      index <root> into <root>/.semnav/graph.db");
-    eprintln!("                           (provisions pyright/tsserver via npm; needs node + npm)");
+    eprintln!("                           (provisions pyright/tsserver via npm, needs node + npm;");
+    eprintln!("                            rust-analyzer must already be on PATH, e.g. via rustup)");
     eprintln!("  semnav serve <root>      serve the 7 MCP tools over stdio, proxied to a");
     eprintln!("                           background daemon (auto-started; run `index` first)");
     eprintln!("  semnav daemon <root>     run the persistent daemon directly (usually auto-started by `serve`)");
@@ -51,6 +52,21 @@ fn print_help() {
     eprintln!("  SEMNAV_CACHE_DIR         override the index/cache dir (default <root>/.semnav)");
     eprintln!(
         "  SEMNAV_DAEMON_IDLE_TIMEOUT_SECS  daemon self-shutdown after this many idle seconds (default 1800)"
+    );
+    eprintln!(
+        "  SEMNAV_INITIALIZE_TIMEOUT_SECS         LSP `initialize` handshake timeout (default 60)"
+    );
+    eprintln!(
+        "  SEMNAV_DOCUMENT_SYMBOL_TIMEOUT_SECS    LSP `documentSymbol` timeout (default 30)"
+    );
+    eprintln!(
+        "  SEMNAV_QUERY_TIMEOUT_SECS              query-time LSP round-trip timeout (default 150)"
+    );
+    eprintln!(
+        "  SEMNAV_LSP_<LANG>_COMMAND  override the LSP server binary for <LANG> (e.g. RUST, PYTHON, TYPESCRIPT)"
+    );
+    eprintln!(
+        "  SEMNAV_LSP_<LANG>_ARGS     extra args appended to that language's LSP server startup command"
     );
 }
 

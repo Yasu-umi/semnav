@@ -52,6 +52,13 @@ Environment:
 
 * `SEMNAV_CACHE_DIR` — override the index/cache directory (default: `<root>/.semnav`)
 * `SEMNAV_DAEMON_IDLE_TIMEOUT_SECS` — daemon self-shutdown after this many idle seconds (default: 1800)
+* `SEMNAV_INITIALIZE_TIMEOUT_SECS` — LSP `initialize` handshake timeout (default: 60)
+* `SEMNAV_DOCUMENT_SYMBOL_TIMEOUT_SECS` — LSP `textDocument/documentSymbol` timeout (default: 30)
+* `SEMNAV_QUERY_TIMEOUT_SECS` — query-time LSP round-trip timeout for `find_references`/`find_callers`/`find_callees`/etc. (default: 150)
+* `SEMNAV_LSP_<LANG>_COMMAND` — override the LSP server binary for `<LANG>` (`PYTHON`/`TYPESCRIPT`/`RUST`, upper-cased `language_name()`), bypassing `PATH`/npm-install resolution entirely — point it at a custom build or wrapper script
+* `SEMNAV_LSP_<LANG>_ARGS` — extra args appended to that language's LSP server startup command (space-separated), e.g. `SEMNAV_LSP_RUST_ARGS="--log-file /tmp/ra.log"`
+
+All of these are ordinary process environment variables, so an MCP client that launches `semnav serve` (e.g. via `.mcp.json`'s `env` field) can set them per-project without any semnav-specific protocol support.
 
 ### Typical flow
 

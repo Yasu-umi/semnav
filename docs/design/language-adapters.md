@@ -49,6 +49,15 @@ LSP server binaries are not bundled with the Rust binary; they are procured via 
 
 The binary is kept lightweight, and language runtimes ride on whatever is present in the environment.
 
+### Environment Overrides
+
+Two environment variables, keyed by `language_name()` upper-cased (`PYTHON`/`TYPESCRIPT`/`RUST`), let the process launching `semnav serve`/`index` (an MCP client's `.mcp.json` `env` block, typically) override provisioning without any semnav-specific configuration protocol — plain launch-time environment variables are the entire "config surface" a stdio MCP server has:
+
+* `SEMNAV_LSP_<LANG>_COMMAND` — replaces the resolved program outright (skips `PATH`/isolated-install resolution). Points at a custom build, a wrapper script, or a server binary at a nonstandard location.
+* `SEMNAV_LSP_<LANG>_ARGS` — extra args appended after the adapter's built-in `CommandSpec::args` (space-separated; no shell-quoting support). Useful for server-specific startup flags semnav doesn't hardcode (e.g. `SEMNAV_LSP_RUST_ARGS="--log-file /tmp/ra.log"`).
+
+The three LSP timeouts (`docs/design/lsp-lifecycle.md`) are similarly overridable process-wide (not per-language): `SEMNAV_INITIALIZE_TIMEOUT_SECS`, `SEMNAV_DOCUMENT_SYMBOL_TIMEOUT_SECS`, `SEMNAV_QUERY_TIMEOUT_SECS`.
+
 ## Distribution
 
 Distributed as a single Rust binary. LSP servers and language runtimes are not bundled; they are procured automatically.
