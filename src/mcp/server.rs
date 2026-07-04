@@ -40,7 +40,7 @@ impl ServerHandler for SemnavServer {}
 impl SemnavServer {
     #[tool(
         name = "find_symbol",
-        description = "Find symbols by fqn pattern (docs/design/mcp-tools.md)."
+        description = "Find symbols by fqn/name pattern across the whole repo, indexed via LSP — not a text search. Prefer this over grep when locating a function/class/symbol by name: it won't false-positive on comments/strings/unrelated identically-named text."
     )]
     pub async fn find_symbol(
         &self,
@@ -57,7 +57,7 @@ impl SemnavServer {
 
     #[tool(
         name = "find_definition",
-        description = "Resolve the declaration at an occurrence position (docs/design/mcp-tools.md)."
+        description = "Resolve the declaration for a symbol or an occurrence position, via LSP go-to-definition. Prefer this over grep/Read when you have a usage site and need its actual declaration — it follows real jumps (renames, re-exports, overloads) that a name-based text search can't."
     )]
     pub async fn find_definition(
         &self,
@@ -74,7 +74,7 @@ impl SemnavServer {
 
     #[tool(
         name = "find_references",
-        description = "List references to a symbol (docs/design/mcp-tools.md)."
+        description = "List every reference to a symbol across the repo, semantically resolved via LSP find-references. Prefer this over grep for 'who uses this' — it matches actual usages of this exact symbol, not every text occurrence of a name that might be reused elsewhere."
     )]
     pub async fn find_references(
         &self,
@@ -91,7 +91,7 @@ impl SemnavServer {
 
     #[tool(
         name = "find_callers",
-        description = "List callers of a symbol (docs/design/mcp-tools.md)."
+        description = "List every caller of a function/method via LSP call hierarchy. Prefer this over grep for 'who calls this' — it resolves real call sites, not every text match of the function's name (including unrelated same-named functions)."
     )]
     pub async fn find_callers(
         &self,
@@ -108,7 +108,7 @@ impl SemnavServer {
 
     #[tool(
         name = "find_callees",
-        description = "List callees of a symbol (docs/design/mcp-tools.md)."
+        description = "List every function/method called from within a function/method, via LSP call hierarchy. Prefer this over manually reading the function body when tracing what it calls, especially across files."
     )]
     pub async fn find_callees(
         &self,
@@ -125,7 +125,7 @@ impl SemnavServer {
 
     #[tool(
         name = "read_range",
-        description = "Read a source slice directly from disk (docs/design/mcp-tools.md)."
+        description = "Read a source slice directly from disk by line range. Pair with the ranges returned by find_* (which never include body text) instead of re-reading whole files."
     )]
     pub async fn read_range(
         &self,
@@ -142,7 +142,7 @@ impl SemnavServer {
 
     #[tool(
         name = "restart_lsp",
-        description = "Force a language's LSP server to restart (or all servers if language is omitted); a maintenance operation, not a graph query (docs/design/mcp-tools.md)."
+        description = "Force a language's LSP server to restart (or all servers if language is omitted); a maintenance operation, not a graph query."
     )]
     pub async fn restart_lsp(
         &self,
