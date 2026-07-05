@@ -1242,6 +1242,59 @@ mod tests {
         );
     }
 
+    /// Real pyright, end-to-end: `workspace/symbol` returns an empty array in
+    /// this environment (`docs/design/lsp-integration.md`: "not to be
+    /// trusted" — semnav works around it by aggregating each file's
+    /// `documentSymbol` instead, and never calls `workspace/symbol` from
+    /// production code). Pinned live so that if a future pyright version
+    /// starts answering it for real, this test fails and prompts revisiting
+    /// that aggregation workaround, instead of the gap going unnoticed.
+    /// Ignored by default — it needs node/npm and provisions pyright from
+    /// npm on first run.
+    #[ignore = "requires node/npm; provisions pyright from npm on first run"]
+    #[tokio::test]
+    async fn workspace_symbol_returns_empty_array_for_pyright() {
+        let dir = tempdir().expect("tempdir");
+        let app = dir.path().join("app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join("mod.py"), "def helper():\n    return 1\n").unwrap();
+
+        let root_uri = root_uri_for(dir.path());
+        let cache_dir = dir.path().join(".semnav");
+        fs::create_dir_all(&cache_dir).unwrap();
+        let db = DbActor::spawn(&cache_dir.join("graph.db")).expect("spawn db");
+        index_language(&db, "python", &root_uri, &cache_dir.join("servers"))
+            .await
+            .expect("index python");
+
+        let engine = QueryEngine::new(db, root_uri.clone());
+        let runtime = QueryRuntime::open(engine, cache_dir.join("servers"));
+        let uri = format!("{}mod.py", root_uri);
+        let (acquired, _deg) = runtime
+            .client_for(&SymbolRef::At {
+                uri,
+                line: 0,
+                character: 0,
+            })
+            .await
+            .expect("acquire");
+        let client = acquired.expect("client").client;
+
+        let result = client
+            .request(
+                "workspace/symbol",
+                Some(serde_json::json!({"query": "helper"})),
+            )
+            .await
+            .expect("workspace/symbol");
+        assert!(
+            result.as_array().is_some_and(|a| a.is_empty()) || result.is_null(),
+            "expected pyright to answer workspace/symbol with nothing, got {result:?}"
+        );
+
+        runtime.shutdown_all().await;
+    }
+
     /// Real pyright, end-to-end: acquire python's supervisor via a live query,
     /// force-restart it, then confirm the pool cleanly respawns on the next
     /// query rather than reusing a stale handle. Ignored by default — it needs

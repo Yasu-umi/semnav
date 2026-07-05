@@ -326,4 +326,62 @@ mod tests {
         assert_eq!(symbols[0].tags, None);
         assert_eq!(symbols[1].detail, None);
     }
+
+    /// Real pyright `textDocument/documentSymbol` on `class Repo: def
+    /// __init__(self): self.base = 1` (`tests/fixtures/lsp-probe/`,
+    /// `docs/design/lsp-integration.md`: "`children` also includes
+    /// parameters and instance attributes (e.g. `self.base`)"). `base`
+    /// (`kind=13` Variable) must flatten as a child of `Repo`, sitting
+    /// alongside `__init__`, not get dropped or promoted to a sibling.
+    #[test]
+    fn flatten_includes_pyright_self_attribute_as_a_child() {
+        let raw = include_str!(
+            "../../tests/fixtures/lsp-probe/captures/python_document_symbol_self_attribute.json"
+        );
+        let symbols: Vec<DocumentSymbol> = serde_json::from_str(raw).expect("parse capture");
+        let flat = flatten_document_symbols(&symbols, "app.mod");
+
+        assert_eq!(flat.len(), 3);
+        assert_eq!(flat[0].fqn, "app.mod.Repo");
+        assert_eq!(flat[1].fqn, "app.mod.Repo.__init__");
+        assert_eq!(flat[1].parent, Some(0));
+        assert_eq!(flat[2].fqn, "app.mod.Repo.base");
+        assert_eq!(flat[2].kind, 13);
+        assert_eq!(
+            flat[2].parent,
+            Some(0),
+            "self.base is a child of Repo, a sibling of __init__ — not nested under it"
+        );
+    }
+
+    /// Real typescript-language-server `textDocument/documentSymbol` on a
+    /// class with 3 overload signatures for the same method name
+    /// (`tests/fixtures/lsp-probe/`, `docs/design/lsp-integration.md`:
+    /// "Overloads appear as separate entries with the same name (parallel
+    /// children, all with `kind=6`)"). 0.0.1's `ON CONFLICT(fqn)` upsert
+    /// collapses same-name overloads into one graph row — this pins that as
+    /// the current, intentional (if lossy) flattening behavior: all 3 raw
+    /// entries survive `flatten_document_symbols` with the identical fqn,
+    /// so it's the later UPSERT, not this step, that does the collapsing.
+    #[test]
+    fn flatten_keeps_tsserver_overload_duplicates_as_separate_entries() {
+        let raw = include_str!(
+            "../../tests/fixtures/lsp-probe/captures/typescript_document_symbol_overloads.json"
+        );
+        let symbols: Vec<DocumentSymbol> = serde_json::from_str(raw).expect("parse capture");
+        let flat = flatten_document_symbols(&symbols, "app.mod");
+
+        assert_eq!(flat.len(), 4, "Greeter + 3 greet overloads");
+        let overloads: Vec<_> = flat.iter().filter(|s| s.name == "greet").collect();
+        assert_eq!(overloads.len(), 3);
+        assert!(
+            overloads.iter().all(|s| s.kind == 6),
+            "all 3 overloads must keep kind=6 (Method)"
+        );
+        assert!(
+            overloads.iter().all(|s| s.fqn == "app.mod.Greeter.greet"),
+            "same fqn for all 3 — flatten_document_symbols does not deduplicate; \
+             the ON CONFLICT(fqn) upsert at write time is what collapses them"
+        );
+    }
 }

@@ -143,4 +143,62 @@ mod tests {
         assert_eq!(child.name, "load");
         assert_eq!(child.container_id, parent.id, "load is contained by Repo");
     }
+
+    /// Real typescript-language-server, end-to-end — the first real e2e
+    /// coverage for this language (every other real-server test in this
+    /// codebase only exercises pyright, `docs/design/lsp-integration.md`
+    /// "Provenance"). Provisions tsserver from npm (first run), indexes
+    /// `class Repo { load() {} }`, and asserts the symbols land in the graph
+    /// with the right FQN and container linkage. Ignored by default — it
+    /// needs node/npm and network on the first run.
+    #[ignore = "requires node/npm; provisions tsserver from npm on first run"]
+    #[tokio::test]
+    async fn index_language_real_tsserver() {
+        let dir = tempdir().expect("tempdir");
+        let app = dir.path().join("app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join("repo.ts"),
+            "export class Repo {\n    load(): void {}\n}\n",
+        )
+        .unwrap();
+
+        let root_uri = root_uri_for(dir.path());
+        let cache_dir = dir.path().join(".semnav");
+        let servers_dir = cache_dir.join("servers");
+        let db_path = cache_dir.join("graph.db");
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let db = DbActor::spawn(&db_path).expect("spawn db");
+
+        let stats = index_language(&db, "typescript", &root_uri, &servers_dir)
+            .await
+            .expect("index typescript");
+        assert!(
+            stats.files_indexed >= 1,
+            "expected at least one file indexed, got {stats:?}"
+        );
+
+        let status = db
+            .get_meta("typescript.lsp_status")
+            .await
+            .expect("get_meta")
+            .expect("typescript.lsp_status recorded");
+        assert_eq!(status, "healthy");
+
+        let parent = db
+            .get_node_by_fqn("app.repo.Repo")
+            .await
+            .unwrap()
+            .expect("Repo node");
+        let child = db
+            .get_node_by_fqn("app.repo.Repo.load")
+            .await
+            .unwrap()
+            .expect("load node");
+        assert_eq!(parent.node_kind, "Class");
+        assert_eq!(parent.language, "typescript");
+        assert_eq!(child.kind, 6, "tsserver reports a class method as Method");
+        assert_eq!(child.name, "load");
+        assert_eq!(child.container_id, parent.id, "load is contained by Repo");
+    }
 }

@@ -1,0 +1,107 @@
+[
+  {
+    "children": [
+      {
+        "children": [],
+        "detail": "",
+        "kind": 6,
+        "name": "greet",
+        "range": {
+          "end": {
+            "character": 32,
+            "line": 1
+          },
+          "start": {
+            "character": 4,
+            "line": 1
+          }
+        },
+        "selectionRange": {
+          "end": {
+            "character": 9,
+            "line": 1
+          },
+          "start": {
+            "character": 4,
+            "line": 1
+          }
+        }
+      },
+      {
+        "children": [],
+        "detail": "",
+        "kind": 6,
+        "name": "greet",
+        "range": {
+          "end": {
+            "character": 45,
+            "line": 2
+          },
+          "start": {
+            "character": 4,
+            "line": 2
+          }
+        },
+        "selectionRange": {
+          "end": {
+            "character": 45,
+            "line": 2
+          },
+          "start": {
+            "character": 4,
+            "line": 2
+          }
+        }
+      },
+      {
+        "children": [],
+        "detail": "",
+        "kind": 6,
+        "name": "greet",
+        "range": {
+          "end": {
+            "character": 5,
+            "line": 5
+          },
+          "start": {
+            "character": 4,
+            "line": 3
+          }
+        },
+        "selectionRange": {
+          "end": {
+            "character": 5,
+            "line": 5
+          },
+          "start": {
+            "character": 4,
+            "line": 3
+          }
+        }
+      }
+    ],
+    "detail": "",
+    "kind": 5,
+    "name": "Greeter",
+    "range": {
+      "end": {
+        "character": 1,
+        "line": 6
+      },
+      "start": {
+        "character": 0,
+        "line": 0
+      }
+    },
+    "selectionRange": {
+      "end": {
+        "character": 13,
+        "line": 0
+      },
+      "start": {
+        "character": 6,
+        "line": 0
+      }
+    }
+  }
+]

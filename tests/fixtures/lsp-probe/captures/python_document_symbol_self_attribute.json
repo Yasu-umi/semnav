@@ -1,0 +1,78 @@
+[
+  {
+    "children": [
+      {
+        "children": [],
+        "kind": 6,
+        "name": "__init__",
+        "range": {
+          "end": {
+            "character": 21,
+            "line": 2
+          },
+          "start": {
+            "character": 4,
+            "line": 1
+          }
+        },
+        "selectionRange": {
+          "end": {
+            "character": 16,
+            "line": 1
+          },
+          "start": {
+            "character": 8,
+            "line": 1
+          }
+        }
+      },
+      {
+        "children": [],
+        "kind": 13,
+        "name": "base",
+        "range": {
+          "end": {
+            "character": 17,
+            "line": 2
+          },
+          "start": {
+            "character": 13,
+            "line": 2
+          }
+        },
+        "selectionRange": {
+          "end": {
+            "character": 17,
+            "line": 2
+          },
+          "start": {
+            "character": 13,
+            "line": 2
+          }
+        }
+      }
+    ],
+    "kind": 5,
+    "name": "Repo",
+    "range": {
+      "end": {
+        "character": 21,
+        "line": 2
+      },
+      "start": {
+        "character": 0,
+        "line": 0
+      }
+    },
+    "selectionRange": {
+      "end": {
+        "character": 10,
+        "line": 0
+      },
+      "start": {
+        "character": 6,
+        "line": 0
+      }
+    }
+  }
+]
