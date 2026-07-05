@@ -22,10 +22,11 @@ source that a live test can just as easily write inline.
 * `captures/<language>_<method>_<case>.json` — a raw JSON-RPC response body
   recorded from a real server, loaded via `include_str!` from unit tests in
   `src/query/lsp_query.rs`, `src/indexer/symbol.rs`, and `src/adapters/kind.rs`.
-* `captures/<language>_<method>_<case>.source.<ext>` — the exact source file
-  the request above was made against, kept side-by-side purely as
-  human-readable provenance for refreshing the capture later. Not read by any
-  test.
+  Every URI inside a capture is sanitized to a stable placeholder
+  (`file:///repo/mod.py`, never a real tempdir path) before it's committed.
+  There's no separate source-fixture file per capture — the tiny snippet the
+  request was made against is documented in the consuming test's doc comment
+  right above the `include_str!` call.
 
 ## Server versions used to record the current captures
 
@@ -34,10 +35,14 @@ pyright `1.1.409` / typescript-language-server `5.1.3` + typescript `6.0.3`
 
 ## Refreshing a capture
 
-1. Drive the server directly over stdio (initialize → didOpen → the request
-   in question) against the paired `.source.<ext>` file, e.g. with a
-   throwaway script, and dump the raw response.
-2. Compare the new raw response against the existing file under `captures/`.
-3. If the server's behavior genuinely changed, update the capture and the
-   assertions in the consuming test together, and update the "Server versions
-   used" section above.
+1. Recreate the fixture snippet documented in the consuming test's doc
+   comment, and drive a real server against it (e.g. spin up a `QueryRuntime`
+   in a throwaway `#[ignore]`d test, acquire a client, and call
+   `LspClient::request` directly with `eprintln!`-dumped output — this is how
+   every capture in this directory was produced).
+2. Sanitize any real filesystem path in the dumped JSON down to the
+   `file:///repo/...` placeholder convention.
+3. Compare against the existing file under `captures/`. If the server's
+   behavior genuinely changed, update the capture and the assertions in the
+   consuming test together, and update the "Server versions used" section
+   above.
