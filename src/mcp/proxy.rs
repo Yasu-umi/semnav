@@ -51,7 +51,10 @@ impl ProxyServer {
     }
 }
 
-#[tool_handler(router = self.tool_router)]
+#[tool_handler(
+    router = self.tool_router,
+    instructions = "Before grepping or reading whole files to navigate this codebase's structure, load this server's tools (find_symbol, find_definition, find_references, find_callers, find_callees, find_call_path, read_range) — they may need an explicit tool-search step to become callable. They resolve real semantic relationships via LSP (definitions, references, call hierarchy), not text matches, and are almost always cheaper and more precise than grep/Read for 'where is X defined', 'who calls/uses X', or 'does A reach B'."
+)]
 impl ServerHandler for ProxyServer {}
 
 #[tool_router]
@@ -212,6 +215,13 @@ mod tests {
         let input = RestartLspInput { language: None };
         let Json(result) = proxy.restart_lsp(Parameters(input)).await.unwrap();
         assert_eq!(result.restarted, vec!["python".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn get_info_advertises_instructions_for_deferred_tool_discovery() {
+        let proxy = test_proxy();
+        let instructions = proxy.get_info().instructions.expect("instructions set");
+        assert!(instructions.contains("find_symbol"));
     }
 
     #[tokio::test]

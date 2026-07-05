@@ -6,6 +6,8 @@ The tool interface that the Semantic Graph MCP exposes to agents. 0.0.1 provides
 
 > **Runtime topology (2026-07, daemon step):** from the MCP client's perspective nothing below changed — same 8 tools, same wire format. Internally, `semnav serve` (what the client actually spawns) no longer executes these tools itself; it proxies each call to a persistent background `semnav daemon` process. See [daemon-lifecycle.md](./daemon-lifecycle.md).
 
+> **Discoverability:** `ProxyServer`/`SemnavServer` set `InitializeResult.instructions` (via `#[tool_handler(instructions = "...")]`) to a short "prefer these tools over grep/Read" directive. Some MCP clients surface a connected server's `instructions` unconditionally at session start, even for tools the client itself defers behind an explicit tool-search step — this is the one channel guaranteed to reach the agent before it falls back to grep.
+
 ## Design principles
 
 1. **The Graph does not hold body text.** The Graph keeps only range metadata (`range_*`/`sel_*`); source code body is read from the FS on demand by `read_range`. This keeps it always up to date, avoids the need for didChange sync, and keeps the Graph size down.
