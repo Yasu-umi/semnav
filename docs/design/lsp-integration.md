@@ -52,7 +52,7 @@ Both servers negotiate `InitializeResult.capabilities.textDocumentSync = 2` (Inc
 ### textDocument/hover → `signature` / `documentation` / `construct`
 
 * **Both servers**: `{contents: MarkupContent, range}`. signature + docstring combined into a single string.
-* **pyright**: `kind` is **mixed** between markdown/plaintext (function/method = markdown code block, class/variable = plaintext). Method hovers use `Self@ClassName` notation.
+* **pyright**: `kind` observed as `plaintext` for both functions and methods (`tests/fixtures/lsp-probe/captures/python_hover_method_self_notation.json`) — not the markdown code block an earlier version of this note claimed. Method hovers use `Self@ClassName` notation.
 * **tsserver**: markdown (a ```` ```typescript ```` code block + JSDoc).
 * **Usage**: source for extracting the `signature`/`documentation` columns. **Required for TS TypeAlias detection** (a leading `type` keyword in the signature → `construct=type` → promoted to `NodeKind::Custom("TypeAlias")`).
 * **`signature` is populated lazily, not at index time**: 0.0.1 indexing is documentSymbol-only, so `signature` starts `null`. It's backfilled the first time a node is hovered — automatically (no extra cost) on `find_definition`'s `at` branch, which already hovers to refine `construct`; or on `find_symbol`/`find_callers`/`find_callees` only when the caller passes `with_signature=true`, since those tools otherwise never touch the LSP to build their `Node`s ([mcp-tools.md](./mcp-tools.md) "Populating `signature`"). Once backfilled it's persisted to the `nodes.signature` column, so later queries never re-hover for it.
