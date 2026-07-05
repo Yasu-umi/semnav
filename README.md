@@ -16,7 +16,7 @@ See [docs/vision.md](docs/vision.md) for the full rationale and [docs/design/](d
 * Nodes carry only metadata (`fqn` / `uri` / `range` / `kind` / `signature`, ...); source text is never cached in the graph and is read from disk on demand via `read_range`.
 * Edges that haven't been built yet (references / call hierarchy) are constructed on demand by querying the LSP, then cached for next time.
 * A filesystem watcher keeps the graph in sync with on-disk edits while a `daemon` is running for `<root>`, including rename tracking (see [docs/design/graph-model.md](docs/design/graph-model.md)).
-* Semantic analysis is fully delegated to the underlying LSP server, so any language with an LSP implementation can in principle be supported. Currently supported: **Python** (pyright) and **TypeScript** (typescript-language-server).
+* Semantic analysis is fully delegated to the underlying LSP server, so any language with an LSP implementation can in principle be supported. Currently supported: **Python** (pyright), **TypeScript** (typescript-language-server), and **Rust** (rust-analyzer).
 
 ## Requirements
 
