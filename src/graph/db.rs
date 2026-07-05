@@ -167,6 +167,20 @@ pub enum DbCommand {
     KnownUris {
         reply: oneshot::Sender<Result<Vec<String>>>,
     },
+    /// Count of `uri`'s real nodes excluding the synthetic module-root (whose
+    /// `fqn` is exactly `module_fqn` — see `FlatSymbol::module_root`).
+    /// Deliberately counts orphaned-but-not-deleted rows too (not just
+    /// `orphan = 0`) — used by startup drift reconcile to tell "this file
+    /// never had real symbols" apart from "the LSP server returned an empty
+    /// result while still warming up" (github.com/Yasu-umi/semnav#6), and
+    /// that signal must stay armed even after a uri has already taken one
+    /// orphan strike, or the guard only ever protects a file the first time
+    /// it's affected (github.com/Yasu-umi/semnav#7).
+    CountRealNodes {
+        uri: String,
+        module_fqn: String,
+        reply: oneshot::Sender<Result<usize>>,
+    },
 }
 
 /// Handle to the db actor. Cheap to clone (just an `mpsc::Sender`).
@@ -308,6 +322,14 @@ impl DbActor {
                 }
                 DbCommand::KnownUris { reply } => {
                     let res = known_uris(&conn);
+                    let _ = reply.send(res);
+                }
+                DbCommand::CountRealNodes {
+                    uri,
+                    module_fqn,
+                    reply,
+                } => {
+                    let res = count_real_nodes(&conn, &uri, &module_fqn);
                     let _ = reply.send(res);
                 }
             }
@@ -589,6 +611,21 @@ impl DbActor {
             .map_err(|_| anyhow!("db actor closed"))?;
         rx.await.map_err(|_| anyhow!("db actor dropped reply"))?
     }
+
+    /// Count of `uri`'s real nodes (orphaned or not) excluding the synthetic
+    /// module-root node whose `fqn` is exactly `module_fqn`.
+    pub async fn count_real_nodes(&self, uri: &str, module_fqn: &str) -> Result<usize> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbCommand::CountRealNodes {
+                uri: uri.to_string(),
+                module_fqn: module_fqn.to_string(),
+                reply: tx,
+            })
+            .await
+            .map_err(|_| anyhow!("db actor closed"))?;
+        rx.await.map_err(|_| anyhow!("db actor dropped reply"))?
+    }
 }
 
 fn apply_pragmas(conn: &Connection) -> Result<()> {
@@ -793,6 +830,22 @@ fn known_uris(conn: &Connection) -> Result<Vec<String>> {
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(uris)
+}
+
+const COUNT_REAL_NODES_SQL: &str = "SELECT COUNT(*) FROM nodes WHERE uri = ?1 AND fqn != ?2";
+
+/// Count of `uri`'s real nodes excluding the synthetic module-root
+/// (identified by its distinctive `fqn`, `module_fqn` — see
+/// `FlatSymbol::module_root`). Includes orphaned-but-not-deleted rows on
+/// purpose: they're still physical evidence the uri once had real symbols,
+/// which is exactly the question the startup-drift guard needs answered
+/// (github.com/Yasu-umi/semnav#7) — a `orphan = 0` filter would go
+/// permanently blind after a uri's first orphan strike.
+fn count_real_nodes(conn: &Connection, uri: &str, module_fqn: &str) -> Result<usize> {
+    let count: i64 = conn.query_row(COUNT_REAL_NODES_SQL, params![uri, module_fqn], |row| {
+        row.get(0)
+    })?;
+    Ok(count as usize)
 }
 
 /// Resolve the smallest valid node whose declaration range contains `(line, col)`
@@ -2288,6 +2341,34 @@ mod tests {
             uris,
             vec!["file:///app/a.py".to_string()],
             "a.py's two nodes collapse to one uri; b.py is orphaned and excluded"
+        );
+    }
+
+    #[tokio::test]
+    async fn count_real_nodes_excludes_module_root_but_counts_orphans() {
+        let dir = tempdir().expect("tempdir");
+        let actor = DbActor::spawn(&dir.path().join("graph.db")).expect("spawn");
+
+        let mut real = node_with("app.a.A", "A", 0);
+        real.uri = "file:///app/a.py".to_string();
+        let mut module_root = node_with("app.a", "a", 0);
+        module_root.uri = "file:///app/a.py".to_string();
+        let mut orphaned = node_with("app.a.Old", "Old", 5);
+        orphaned.uri = "file:///app/a.py".to_string();
+        orphaned.orphan = true;
+        actor.upsert_node(real).await.unwrap();
+        actor.upsert_node(module_root).await.unwrap();
+        actor.upsert_node(orphaned).await.unwrap();
+
+        let count = actor
+            .count_real_nodes("file:///app/a.py", "app.a")
+            .await
+            .unwrap();
+        assert_eq!(
+            count, 2,
+            "the non-module-root node counts whether or not it's orphaned — an \
+             orphan strike must not make the startup-drift guard go permanently \
+             blind for this uri (github.com/Yasu-umi/semnav#7)"
         );
     }
 
