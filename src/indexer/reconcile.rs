@@ -351,9 +351,13 @@ mod tests {
                 "/nonexistent/semnav-test-rust-analyzer",
             );
         }
-        let result =
-            reconcile_uri_for_startup_drift(&db, &query_runtime, "file:///root", "file:///root/lib.rs")
-                .await;
+        let result = reconcile_uri_for_startup_drift(
+            &db,
+            &query_runtime,
+            "file:///root",
+            "file:///root/lib.rs",
+        )
+        .await;
         unsafe {
             std::env::remove_var("SEMNAV_LSP_RUST_COMMAND");
         }
