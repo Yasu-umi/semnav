@@ -395,6 +395,44 @@ mod tests {
         assert!(err.is_err());
     }
 
+    /// Real pyright's exact `-32601` envelope for `textDocument/implementation`
+    /// (`docs/design/lsp-integration.md`: "pyright: unsupported (-32601
+    /// Unhandled method)" — Python's duck typing makes "implementation" a weak
+    /// concept there), observed live. Must surface as a typed `Err` carrying
+    /// the code and message, not panic or hang, so a caller (once the
+    /// `implements` edge is implemented) can treat it as "not supported here"
+    /// rather than a crash.
+    #[tokio::test]
+    async fn unhandled_method_error_surfaces_pyrights_exact_envelope() {
+        let (client_writer, server_reader) = duplex(8192);
+        let (server_writer, client_reader) = duplex(8192);
+        tokio::spawn(async move {
+            let mut sr = BufReader::new(server_reader);
+            let mut sw = server_writer;
+            let req = read_message::<_>(&mut sr).await.unwrap().unwrap();
+            let id = req["id"].as_i64().unwrap();
+            let err = Message::Error {
+                jsonrpc: JsonRpcVersion,
+                id,
+                error: RpcError {
+                    code: -32601,
+                    message: "Unhandled method textDocument/implementation".into(),
+                    data: None,
+                },
+            };
+            write_message(&mut sw, &err).await.unwrap();
+        });
+
+        let client = LspClient::spawn(client_reader, client_writer);
+        let err = client
+            .request("textDocument/implementation", None)
+            .await
+            .expect_err("unhandled method must surface as an error, not panic");
+        let msg = err.to_string();
+        assert!(msg.contains("-32601"));
+        assert!(msg.contains("Unhandled method textDocument/implementation"));
+    }
+
     #[tokio::test]
     async fn stream_close_fails_pending_request() {
         // Server half closes immediately; the client request must surface an error.

@@ -180,6 +180,45 @@ mod tests {
         assert_eq!(SymbolKind::from_u32(99), None);
     }
 
+    /// Real pyright `textDocument/hover` on a method (`tests/fixtures/lsp-probe/`,
+    /// `docs/design/lsp-integration.md` "Method hovers use `Self@ClassName`
+    /// notation"): the hover text's first non-fence word is `(method)`, which
+    /// isn't a KEYWORDS entry, so this must never be misread as a `class`/
+    /// `type` construct just because `Self@Greeter` appears later in the line.
+    #[test]
+    fn construct_from_hover_ignores_self_at_classname_notation() {
+        let raw: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/lsp-probe/captures/python_hover_method_self_notation.json"
+        ))
+        .unwrap();
+        let text = raw["contents"]["value"].as_str().unwrap();
+        assert!(
+            text.contains("Self@Greeter"),
+            "capture must actually contain the notation under test: {text:?}"
+        );
+        assert_eq!(NodeKind::construct_from_hover(text), None);
+    }
+
+    /// Real typescript-language-server `textDocument/hover` on a `type` alias
+    /// declared with a leading JSDoc comment (`tests/fixtures/lsp-probe/`):
+    /// the ` ```typescript ` fence-skip logic must still land on the `type
+    /// Greeting = string` line even though the JSDoc body trails the fenced
+    /// code block, not precedes it — the doc's "SymbolKind trap (TS)" note
+    /// promotes exactly this shape to `NodeKind::Custom("TypeAlias")`
+    /// (`docs/design/language-adapters.md` "Refinement via hover").
+    #[test]
+    fn construct_from_hover_extracts_type_keyword_from_fenced_code_block() {
+        let raw: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/lsp-probe/captures/typescript_hover_type_alias_with_jsdoc.json"
+        ))
+        .unwrap();
+        let text = raw["contents"]["value"].as_str().unwrap();
+        assert_eq!(
+            NodeKind::construct_from_hover(text),
+            Some("type".to_string())
+        );
+    }
+
     #[test]
     fn node_kind_label_serializes() {
         assert_eq!(NodeKind::Standard(SymbolKind::Class).to_label(), "Class");

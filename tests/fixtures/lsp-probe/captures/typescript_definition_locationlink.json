@@ -1,0 +1,35 @@
+[
+  {
+    "originSelectionRange": {
+      "end": {
+        "character": 17,
+        "line": 5
+      },
+      "start": {
+        "character": 11,
+        "line": 5
+      }
+    },
+    "targetRange": {
+      "end": {
+        "character": 1,
+        "line": 2
+      },
+      "start": {
+        "character": 0,
+        "line": 0
+      }
+    },
+    "targetSelectionRange": {
+      "end": {
+        "character": 15,
+        "line": 0
+      },
+      "start": {
+        "character": 9,
+        "line": 0
+      }
+    },
+    "targetUri": "file:///repo/mod.ts"
+  }
+]

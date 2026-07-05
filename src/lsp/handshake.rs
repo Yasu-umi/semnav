@@ -65,7 +65,12 @@ pub fn query_timeout_from_env() -> Duration {
 /// `workspaceFolders` MUST be declared so the server performs its workspace
 /// scan; `rootUri` is sent alongside for older servers but is not sufficient on
 /// its own. Capabilities advertise exactly what the indexer/query path needs:
-/// hierarchical symbols, hover (for `construct` refinement), and call hierarchy.
+/// hierarchical symbols, hover (for `construct` refinement), call hierarchy,
+/// and `linkSupport` on definition/typeDefinition/implementation so a server
+/// that has one (tsserver; pyright ignores it, `docs/design/lsp-integration.md`)
+/// can return a `LocationLink` — `originSelectionRange` gives a more precise
+/// reference position than the plain `Location` fallback `parse_locations`
+/// (`src/query/lsp_query.rs`) otherwise collapses onto.
 pub fn build_initialize_params(root_uri: &str, workspace_name: &str) -> Value {
     json!({
         "processId": std::process::id(),
@@ -80,6 +85,15 @@ pub fn build_initialize_params(root_uri: &str, workspace_name: &str) -> Value {
             "textDocument": {
                 "documentSymbol": {
                     "hierarchicalDocumentSymbolSupport": true
+                },
+                "definition": {
+                    "linkSupport": true
+                },
+                "typeDefinition": {
+                    "linkSupport": true
+                },
+                "implementation": {
+                    "linkSupport": true
                 },
                 "hover": {},
                 "callHierarchy": {}
@@ -141,6 +155,12 @@ mod tests {
         );
         assert!(params["capabilities"]["textDocument"]["hover"].is_object());
         assert!(params["capabilities"]["textDocument"]["callHierarchy"].is_object());
+        for method in ["definition", "typeDefinition", "implementation"] {
+            assert_eq!(
+                params["capabilities"]["textDocument"][method]["linkSupport"], true,
+                "{method} must advertise linkSupport so a server that has one can return a LocationLink"
+            );
+        }
         assert!(
             params["processId"].as_u64().is_some(),
             "processId is a number"

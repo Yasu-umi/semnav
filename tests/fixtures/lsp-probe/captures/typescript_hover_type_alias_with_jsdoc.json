@@ -1,0 +1,16 @@
+{
+  "contents": {
+    "kind": "markdown",
+    "value": "\n```typescript\ntype Greeting = string\n```\nA greeting."
+  },
+  "range": {
+    "end": {
+      "character": 20,
+      "line": 3
+    },
+    "start": {
+      "character": 12,
+      "line": 3
+    }
+  }
+}

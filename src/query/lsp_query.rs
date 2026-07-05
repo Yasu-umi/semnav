@@ -717,6 +717,41 @@ mod tests {
         assert!(parse_locations(Value::Null).unwrap().is_empty());
     }
 
+    /// Real pyright `textDocument/definition` response (`tests/fixtures/lsp-probe/`,
+    /// `docs/design/lsp-integration.md`): pyright answers with a plain `Location`,
+    /// not a `LocationLink`, regardless of client capabilities.
+    #[test]
+    fn parse_locations_matches_captured_pyright_definition() {
+        let raw: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/lsp-probe/captures/python_definition_basic.json"
+        ))
+        .unwrap();
+        let locs = parse_locations(raw).unwrap();
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0].uri, "file:///repo/mod.py");
+        assert_eq!(locs[0].range.start.character, 4);
+        assert_eq!(locs[0].range.end.character, 10);
+    }
+
+    /// Real typescript-language-server `textDocument/definition` response —
+    /// captured only once semnav's `initialize` actually declared
+    /// `linkSupport: true` (`src/lsp/handshake.rs`); before that fix, tsserver
+    /// silently fell back to a plain `Location` despite the doc's original
+    /// claim. `targetSelectionRange` (the identifier) wins over the broader
+    /// `targetRange` (the whole declaration).
+    #[test]
+    fn parse_locations_matches_captured_tsserver_locationlink() {
+        let raw: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/lsp-probe/captures/typescript_definition_locationlink.json"
+        ))
+        .unwrap();
+        let locs = parse_locations(raw).unwrap();
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0].uri, "file:///repo/mod.ts");
+        assert_eq!(locs[0].range.start.character, 9);
+        assert_eq!(locs[0].range.end.character, 15);
+    }
+
     #[test]
     fn parse_hover_flattens_markup_and_string_contents() {
         let markup = serde_json::json!({"contents": {"kind": "markdown", "value": "doc body"}});

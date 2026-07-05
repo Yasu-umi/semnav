@@ -1,0 +1,16 @@
+{
+  "contents": {
+    "kind": "plaintext",
+    "value": "(method) def greet(self: Self@Greeter) -> Literal['hi']"
+  },
+  "range": {
+    "end": {
+      "character": 13,
+      "line": 4
+    },
+    "start": {
+      "character": 8,
+      "line": 4
+    }
+  }
+}
