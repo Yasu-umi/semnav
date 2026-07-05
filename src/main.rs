@@ -20,6 +20,7 @@ use semnav::mcp::{ProxyServer, SemnavServer};
 use semnav::query::{QueryEngine, QueryRuntime};
 
 fn main() -> ExitCode {
+    init_tracing();
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("discover") => discover(&args[2..]),
@@ -35,6 +36,26 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
     }
+}
+
+/// Wire up `tracing` for the `tool{}`/`lsp_request{}` spans
+/// (`docs/design/observability.md`). Silent by default (`warn`-and-above, and
+/// nothing currently logs at that level) — writes to stderr only, so it can
+/// never land on the stdout stream `serve`'s MCP JSON-RPC protocol owns
+/// (`rmcp::transport::io::stdio()`, below). Controlled by `SEMNAV_LOG`
+/// (`RUST_LOG`-style syntax, e.g. `SEMNAV_LOG=semnav=debug`), not `RUST_LOG`
+/// itself, to stay under the same `SEMNAV_*` namespace as this binary's other
+/// env vars (see `print_help`).
+fn init_tracing() {
+    let filter = tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(tracing::level_filters::LevelFilter::WARN.into())
+        .with_env_var("SEMNAV_LOG")
+        .from_env_lossy();
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+        .with_writer(std::io::stderr)
+        .init();
 }
 
 fn print_help() {
@@ -71,6 +92,9 @@ fn print_help() {
     );
     eprintln!(
         "  SEMNAV_LSP_<LANG>_ARGS     extra args appended to that language's LSP server startup command"
+    );
+    eprintln!(
+        "  SEMNAV_LOG                 tracing filter (RUST_LOG syntax, e.g. `semnav=debug`);\n                             default is silent (docs/design/observability.md)"
     );
 }
 

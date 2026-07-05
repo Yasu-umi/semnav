@@ -14,6 +14,7 @@ use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite, BufReader};
 use tokio::sync::{mpsc, oneshot};
+use tracing::Instrument;
 
 use super::proto::{Id, JsonRpcVersion, Message, RpcError};
 use super::transport::{read_message, write_message};
@@ -80,25 +81,34 @@ impl LspClient {
         }
     }
 
-    /// Send a request and await its result.
+    /// Send a request and await its result. Spans this as `lsp_request`
+    /// (`docs/design/observability.md`) — its `time.busy` on span close is the
+    /// actual LSP round-trip (including the actor's own queue wait), the
+    /// figure to diff against an enclosing `tool` span to tell "LSP was slow"
+    /// from "semnav was slow".
     pub async fn request(&self, method: &str, params: Option<Value>) -> Result<Value> {
-        let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(Cmd::Request {
-                method: method.to_string(),
-                params,
-                reply: tx,
-            })
-            .await
-            .map_err(|_| anyhow!("lsp client closed"))?;
-        match rx.await.map_err(|_| anyhow!("lsp client dropped reply"))? {
-            Ok(value) => Ok(value),
-            Err(err) => Err(anyhow!(
-                "lsp rpc error (code {}): {}",
-                err.code,
-                err.message
-            )),
+        let span = tracing::debug_span!("lsp_request", method = %method);
+        async move {
+            let (tx, rx) = oneshot::channel();
+            self.tx
+                .send(Cmd::Request {
+                    method: method.to_string(),
+                    params,
+                    reply: tx,
+                })
+                .await
+                .map_err(|_| anyhow!("lsp client closed"))?;
+            match rx.await.map_err(|_| anyhow!("lsp client dropped reply"))? {
+                Ok(value) => Ok(value),
+                Err(err) => Err(anyhow!(
+                    "lsp rpc error (code {}): {}",
+                    err.code,
+                    err.message
+                )),
+            }
         }
+        .instrument(span)
+        .await
     }
 
     /// Send a fire-and-forget notification.

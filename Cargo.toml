@@ -28,6 +28,10 @@ serde_json = "1.0.150"
 # `net` (UnixListener/UnixStream) is unused until the daemon's serve<->daemon
 # IPC lands; added here so that later diff is dependency-clean.
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "sync", "time", "process", "fs", "io-util", "signal", "net"] }
+# Already pulled in transitively via `rmcp` (`cargo tree -i tracing`); promoted
+# to a direct dependency for our own spans (`SEMNAV_LOG`, docs/design/observability.md).
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 which = "7"
 
 [dev-dependencies]

@@ -2,12 +2,19 @@
 //! domain logic (`docs/design/crate-structure.md` Decision Point 5) — every tool
 //! destructures its input DTO, calls straight into `runtime`, and reshapes
 //! the result via `super::dto`.
+//!
+//! Each tool body is wrapped in a `tool{name=...}` span
+//! (`docs/design/observability.md`) so its total time and call count show up
+//! in `SEMNAV_LOG` output; diff that against nested `lsp_request{}` spans
+//! (`src/lsp/client.rs`) to tell "LSP was slow" from "semnav's own work was
+//! slow" for a given call.
 
 use std::sync::Arc;
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ErrorData, Json, ServerHandler, tool, tool_handler, tool_router};
+use tracing::Instrument;
 
 use crate::query::{FindSymbolResult, QueryRuntime, ReadRangeResult, SymbolRef};
 
@@ -46,13 +53,17 @@ impl SemnavServer {
         &self,
         Parameters(input): Parameters<FindSymbolInput>,
     ) -> Result<Json<FindSymbolResult>, ErrorData> {
-        let (pattern, mode, ignore_case, options, filter, page) = input.into_parts()?;
-        let result = self
-            .runtime
-            .find_symbol(&pattern, mode, ignore_case, options, &filter, &page)
-            .await
-            .map_err(internal_error)?;
-        Ok(Json(result))
+        async move {
+            let (pattern, mode, ignore_case, options, filter, page) = input.into_parts()?;
+            let result = self
+                .runtime
+                .find_symbol(&pattern, mode, ignore_case, options, &filter, &page)
+                .await
+                .map_err(internal_error)?;
+            Ok(Json(result))
+        }
+        .instrument(tracing::info_span!("tool", name = "find_symbol"))
+        .await
     }
 
     #[tool(
@@ -63,13 +74,17 @@ impl SemnavServer {
         &self,
         Parameters(input): Parameters<FindDefinitionInput>,
     ) -> Result<Json<FindDefinitionOutput>, ErrorData> {
-        let symref = SymbolRef::from(input);
-        let result = self
-            .runtime
-            .find_definition(&symref)
-            .await
-            .map_err(internal_error)?;
-        Ok(Json(result.into()))
+        async move {
+            let symref = SymbolRef::from(input);
+            let result = self
+                .runtime
+                .find_definition(&symref)
+                .await
+                .map_err(internal_error)?;
+            Ok(Json(result.into()))
+        }
+        .instrument(tracing::info_span!("tool", name = "find_definition"))
+        .await
     }
 
     #[tool(
@@ -80,13 +95,17 @@ impl SemnavServer {
         &self,
         Parameters(input): Parameters<SymbolQueryInput>,
     ) -> Result<Json<FindReferencesOutput>, ErrorData> {
-        let (symref, filter, page) = input.into_parts()?;
-        let result = self
-            .runtime
-            .find_references(&symref, &filter, &page)
-            .await
-            .map_err(internal_error)?;
-        Ok(Json(result.into()))
+        async move {
+            let (symref, filter, page) = input.into_parts()?;
+            let result = self
+                .runtime
+                .find_references(&symref, &filter, &page)
+                .await
+                .map_err(internal_error)?;
+            Ok(Json(result.into()))
+        }
+        .instrument(tracing::info_span!("tool", name = "find_references"))
+        .await
     }
 
     #[tool(
@@ -97,13 +116,17 @@ impl SemnavServer {
         &self,
         Parameters(input): Parameters<CallGraphQueryInput>,
     ) -> Result<Json<FindCallersOutput>, ErrorData> {
-        let (symref, filter, page, with_signature) = input.into_parts()?;
-        let result = self
-            .runtime
-            .find_callers(&symref, &filter, &page, with_signature)
-            .await
-            .map_err(internal_error)?;
-        Ok(Json(result.into()))
+        async move {
+            let (symref, filter, page, with_signature) = input.into_parts()?;
+            let result = self
+                .runtime
+                .find_callers(&symref, &filter, &page, with_signature)
+                .await
+                .map_err(internal_error)?;
+            Ok(Json(result.into()))
+        }
+        .instrument(tracing::info_span!("tool", name = "find_callers"))
+        .await
     }
 
     #[tool(
@@ -114,13 +137,17 @@ impl SemnavServer {
         &self,
         Parameters(input): Parameters<CallGraphQueryInput>,
     ) -> Result<Json<FindCalleesOutput>, ErrorData> {
-        let (symref, filter, page, with_signature) = input.into_parts()?;
-        let result = self
-            .runtime
-            .find_callees(&symref, &filter, &page, with_signature)
-            .await
-            .map_err(internal_error)?;
-        Ok(Json(result.into()))
+        async move {
+            let (symref, filter, page, with_signature) = input.into_parts()?;
+            let result = self
+                .runtime
+                .find_callees(&symref, &filter, &page, with_signature)
+                .await
+                .map_err(internal_error)?;
+            Ok(Json(result.into()))
+        }
+        .instrument(tracing::info_span!("tool", name = "find_callees"))
+        .await
     }
 
     #[tool(
@@ -131,13 +158,17 @@ impl SemnavServer {
         &self,
         Parameters(input): Parameters<FindCallPathInput>,
     ) -> Result<Json<FindCallPathOutput>, ErrorData> {
-        let (from, to, max_depth, max_lsp_calls) = input.into_parts()?;
-        let result = self
-            .runtime
-            .find_call_path(&from, &to, max_depth, max_lsp_calls)
-            .await
-            .map_err(internal_error)?;
-        Ok(Json(result.into()))
+        async move {
+            let (from, to, max_depth, max_lsp_calls) = input.into_parts()?;
+            let result = self
+                .runtime
+                .find_call_path(&from, &to, max_depth, max_lsp_calls)
+                .await
+                .map_err(internal_error)?;
+            Ok(Json(result.into()))
+        }
+        .instrument(tracing::info_span!("tool", name = "find_call_path"))
+        .await
     }
 
     #[tool(
@@ -148,13 +179,17 @@ impl SemnavServer {
         &self,
         Parameters(input): Parameters<ReadRangeInput>,
     ) -> Result<Json<ReadRangeResult>, ErrorData> {
-        let (uri, start_line, end_line) = input.into_parts();
-        let result = self
-            .runtime
-            .read_range(&uri, start_line, end_line)
-            .await
-            .map_err(internal_error)?;
-        Ok(Json(result))
+        async move {
+            let (uri, start_line, end_line) = input.into_parts();
+            let result = self
+                .runtime
+                .read_range(&uri, start_line, end_line)
+                .await
+                .map_err(internal_error)?;
+            Ok(Json(result))
+        }
+        .instrument(tracing::info_span!("tool", name = "read_range"))
+        .await
     }
 
     #[tool(
@@ -165,11 +200,15 @@ impl SemnavServer {
         &self,
         Parameters(input): Parameters<RestartLspInput>,
     ) -> Result<Json<RestartLspResult>, ErrorData> {
-        let restarted = self
-            .runtime
-            .restart_language(input.language.as_deref())
-            .await;
-        Ok(Json(RestartLspResult { restarted }))
+        async move {
+            let restarted = self
+                .runtime
+                .restart_language(input.language.as_deref())
+                .await;
+            Ok(Json(RestartLspResult { restarted }))
+        }
+        .instrument(tracing::info_span!("tool", name = "restart_lsp"))
+        .await
     }
 }
 
