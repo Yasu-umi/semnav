@@ -6,6 +6,9 @@ license = "MIT"
 authors = ["Yasu_umi"]
 repository = "https://github.com/Yasu-umi/semnav"
 description = "LSP-backed Semantic Graph MCP server"
+readme = "README.md"
+keywords = ["lsp", "mcp", "ai-agents", "code-navigation", "semantic-graph"]
+categories = ["development-tools", "command-line-utilities"]
 
 [dependencies]
 anyhow = "1.0.103"

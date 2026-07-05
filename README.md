@@ -40,7 +40,7 @@ semnav discover <root>   list source files (Python/TS/Rust) under <root>
 semnav index <root>      index <root> into <root>/.semnav/graph.db
                          (provisions pyright/tsserver via npm, needs node + npm;
                           rust-analyzer must already be on PATH, e.g. via rustup)
-semnav serve <root>      serve the 7 MCP tools over stdio, proxied to a
+semnav serve <root>      serve the 8 MCP tools over stdio, proxied to a
                          background daemon (auto-started; run `index` first)
 semnav daemon <root>     run the persistent daemon directly (usually auto-started by `serve`)
 semnav daemon stop <root> stop a running daemon for <root>
@@ -67,7 +67,18 @@ semnav index /path/to/your/project
 semnav serve /path/to/your/project
 ```
 
-`serve` speaks MCP over stdio, so it's meant to be launched by an MCP client (e.g. registered as an MCP server in your agent's config) rather than run interactively.
+`serve` speaks MCP over stdio, so it's meant to be launched by an MCP client (e.g. registered as an MCP server in your agent's config) rather than run interactively. For example, in a project's `.mcp.json` (Claude Code) or an equivalent MCP client config:
+
+```json
+{
+  "mcpServers": {
+    "semnav": {
+      "command": "/path/to/semnav",
+      "args": ["serve", "/path/to/your/project"]
+    }
+  }
+}
+```
 
 ## MCP tools
 
