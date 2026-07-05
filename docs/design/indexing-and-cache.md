@@ -6,7 +6,7 @@ The initial run does not require fully parsing the entire Repository. At minimum
 
 ### File Discovery & Collection (0.0.1)
 
-* **Target**: Walk the tree under `workspaceFolders` (rootUri) and collect files with the target language extensions (`.py` / `.ts` / `.tsx`)
+* **Target**: Walk the tree under `workspaceFolders` (rootUri) and collect files with the target language extensions (`.py` / `.ts` / `.tsx` / `.rs`)
 * **Exclusions**: Respect `.gitignore` via the `ignore` crate (plus cache directories such as `.semnav/`). `is_external` paths (the external prefix list in [graph-model.md](./graph-model.md)) are also excluded from the Graph's documentSymbol collection (the LSP generates them as external nodes on reference)
 * **Collection order**: Request documentSymbol from the LSP one file at a time. 0.0.1 is **serial** (a single stdio connection processed sequentially is safe). Progress is measured via `window/logMessage` plus the index progress in `index_meta`
 * **Interruption**: Aborted by the Graph process's cancellation signal (a partial index is acceptable)

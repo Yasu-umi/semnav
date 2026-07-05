@@ -120,6 +120,7 @@ Externally resolved nodes such as typeshed / node_modules / site-packages / .ven
    * `/node_modules/`
    * `/site-packages/`
    * `/.venv/lib/` (standard venv layout) + regex `<venv-root>/lib/python<ver>/` (pyenv/pip standard library implementation)
+   * `/target/`, `/.cargo/registry/`, `/.cargo/git/` (rust-analyzer build output and crates.io/git dependency sources)
 2. **Not under rootUri** (this condition is disabled when rootUri is unset)
 
 Why both are implemented: (1) alone risks misclassifying an in-project `node_modules` directory; (2) alone risks treating everything as external if rootUri is misconfigured.

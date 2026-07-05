@@ -117,10 +117,6 @@ This is deliberately asymmetric with the "never lie with an empty result" invari
 
 The FS watcher's reconcile loop and a live query can both want the same language server at once. Rather than a priority queue (the reconcile loop already holds at most one in-flight `documentSymbol` request — see [indexing-and-cache.md](./indexing-and-cache.md)), `QueryRuntime` tracks an in-flight count of foreground LSP-touching queries (`find_references`/`find_callers`/`find_callees`, and `find_definition`'s `at`-position path). The watcher awaits the count reaching zero before *starting* its next per-file reconcile, so a live query isn't taxed by concurrent `documentSymbol` traffic saturating the server. It cannot preempt a reconcile already in flight, and background refreshes (above) deliberately don't hold this gate — they're best-effort load, not live queries, and holding it would let a stream of warm queries starve the watcher.
 
-## Reproducing the live verification
+## Provenance of the live verification
 
-The probes remain under `/tmp` (re-runnable):
-* pyright: `/tmp/pyright_probe/{sample.py, m2.py, probe*.py}`
-* tsserver: `/tmp/semnav_sample/{sample.ts, probe*.mjs}`
-
-Since `/tmp` is ephemeral, if permanent reproducibility is needed, each harness should be relocated into the repo under something like `tests/fixtures/lsp-probe/` (not yet done).
+These findings came from an ad hoc harness driving pyright and typescript-language-server directly over stdio against small scratch fixtures. The fixtures were never checked into the repo and no longer exist, so the findings above are a point-in-time empirical record, not a reproducible test suite. Turning them into a proper conformance suite (e.g. under `tests/fixtures/lsp-probe/`) is tracked as future work.

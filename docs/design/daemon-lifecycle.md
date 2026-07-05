@@ -56,7 +56,7 @@ A narrow window exists between the winner releasing the lock and the spawned dae
 
 ## Wire protocol (`serve` ↔ `daemon`)
 
-Newline-delimited JSON over a raw `UnixStream` — deliberately **not** MCP/rmcp on this link. Evaluated and rejected reusing rmcp's `transport-streamable-http-server` bound to a `UnixListener`: architecturally possible, but rmcp ships no server-side Unix-socket precedent (only a client exists), and standing up the HTTP/1.1 framing by hand pulls in `hyper`/`tower` just to shuttle 7 fixed operations between two processes of the same binary. See `docs/design/crate-structure.md` Decision Point 6 for the full comparison.
+Newline-delimited JSON over a raw `UnixStream` — deliberately **not** MCP/rmcp on this link. Evaluated and rejected reusing rmcp's `transport-streamable-http-server` bound to a `UnixListener`: architecturally possible, but rmcp ships no server-side Unix-socket precedent (only a client exists), and standing up the HTTP/1.1 framing by hand pulls in `hyper`/`tower` just to shuttle 8 fixed operations between two processes of the same binary. See `docs/design/crate-structure.md` Decision Point 6 for the full comparison.
 
 ```
 {"id": 1, "request": {"op": "FindSymbol", "params": {...}}}          // serve -> daemon

@@ -35,8 +35,11 @@ Per the decisions in [mcp-tools.md](./mcp-tools.md) (read_range reads the FS dir
 | `find_references` | High (on-demand) | Cache only; unbuilt ones cannot be returned | Yes |
 | `find_callers` | High (on-demand callHierarchy) | Same as above | Yes |
 | `find_callees` | High (on-demand callHierarchy) | Same as above | Yes |
+| `find_call_path` | High (on-demand callHierarchy, budgeted BFS) | Search stops early on `max_depth`/`max_lsp_calls`/no client; `limit_reached: true` marks the answer as inconclusive rather than proven | No\*\* |
 
 \* `find_symbol` needs LSP to re-validate dirty Nodes (see the dirty lifecycle in [graph-model.md](./graph-model.md)), but while degraded it returns the stale cache as-is and does not attach `degraded` (a stale FQN is still practically useful for search purposes). The `valid` field of any individual Node awaiting dirty re-validation stays `false`.
+
+\*\* `find_call_path` doesn't use the `degraded`/`degrade_reason`/`lsp_status` schema at all — an unavailable LSP client is just one more reason the BFS budget runs out, folded into the same `limit_reached` honesty signal it already needs for `max_depth`/`max_lsp_calls` ([mcp-tools.md](./mcp-tools.md) "find_call_path").
 
 ### degraded response schema
 
@@ -93,7 +96,7 @@ The following is recorded in the KV (`index_meta`) described in [graph-model.md]
 * `lsp_last_success_at`: timestamp of last success
 * `lsp_consecutive_failures`: consecutive failure count
 
-In 0.0.1, a tool like `graph status` is out of scope (only the 6 Query API tools plus `restart_lsp` exist), so this is **for logging/debugging only**. It reaches the agent via the `degraded` flag.
+In 0.0.1, a tool like `graph status` is out of scope (only the 7 Query API tools plus `restart_lsp` exist), so this is **for logging/debugging only**. It reaches the agent via the `degraded` flag.
 
 ## Timeouts (finalized, implemented)
 
