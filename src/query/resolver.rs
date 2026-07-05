@@ -20,7 +20,7 @@ use std::cmp::Ordering;
 use anyhow::Result;
 
 use crate::graph::{Direction, Edge, Neighbor, Node, Range, Site};
-use crate::indexer::LspRange;
+use crate::indexer::{LspRange, module_path_from_uri};
 
 use super::QueryEngine;
 use super::lsp_query::{LspQueryClient, is_timeout};
@@ -165,15 +165,37 @@ impl QueryEngine {
                     }
                 };
                 for call in calls {
-                    let Some(caller) = self
-                        .db
-                        .find_node_by_position(
-                            &call.from.uri,
-                            call.from.selection_range.start.line as i64,
-                            call.from.selection_range.start.character as i64,
-                        )
-                        .await?
-                    else {
+                    // A module-scope call site (outside every def/class) has
+                    // no real identifier to anchor a `selectionRange` to, so
+                    // both pyright and typescript-language-server report it
+                    // as a synthetic pseudo-item whose `selectionRange` is
+                    // the zero-width sentinel `{0,0}-{0,0}` (observed live;
+                    // `docs/design/lsp-integration.md` callHierarchy note) —
+                    // not a real occurrence of code at that exact point. A
+                    // plain position lookup for `(0,0)` would tie-break
+                    // toward whichever *real* symbol happens to start there
+                    // (e.g. the file's first top-level `def`/`class`) via
+                    // `find_node_by_position`'s innermost-span rule, instead
+                    // of the synthesized module node — so the sentinel is
+                    // resolved directly against the module's own root
+                    // instead of by position.
+                    let caller = if call.from.selection_range.start.line == 0
+                        && call.from.selection_range.start.character == 0
+                        && call.from.selection_range.end.line == 0
+                        && call.from.selection_range.end.character == 0
+                    {
+                        let module_fqn = module_path_from_uri(&call.from.uri, self.root_uri());
+                        self.db.get_node_by_fqn(&module_fqn).await?
+                    } else {
+                        self.db
+                            .find_node_by_position(
+                                &call.from.uri,
+                                call.from.selection_range.start.line as i64,
+                                call.from.selection_range.start.character as i64,
+                            )
+                            .await?
+                    };
+                    let Some(caller) = caller else {
                         continue;
                     };
                     let Some(caller_id) = caller.id else {

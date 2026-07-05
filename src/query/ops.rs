@@ -1264,6 +1264,115 @@ mod tests {
         assert!(!timed_out);
     }
 
+    /// The module-scope pseudo-item's `selectionRange` is a zero-width
+    /// `{0,0}-{0,0}` sentinel on both pyright and typescript-language-server
+    /// (observed live — `docs/design/lsp-integration.md` callHierarchy
+    /// note), not a real occurrence of code at that position. `helper` here
+    /// (like every `func()`-built test node) also happens to start at
+    /// `(0,0)` — a plain position lookup for the sentinel would tie-break
+    /// toward `helper` itself (the smaller span) via
+    /// `find_node_by_position`'s innermost-span rule, misattributing the
+    /// module-scope caller to the callee it's calling. The resolver must
+    /// resolve the `{0,0}-{0,0}` sentinel against the module's own root
+    /// directly instead of by position, regardless of what else happens to
+    /// start there.
+    #[tokio::test]
+    async fn find_callers_module_scope_sentinel_wins_even_when_a_real_symbol_starts_at_the_same_position()
+     {
+        let dir = tempdir().unwrap();
+        let db = crate::graph::DbActor::spawn(&dir.path().join("g.db")).unwrap();
+        std::mem::forget(dir);
+        // `module_path_from_uri` (used by the sentinel path) derives the
+        // module fqn from `root_uri`, unlike the rest of this file's tests —
+        // "file:///" (not "file:///repo") so `URI` ("file:///repo/mod.py")
+        // derives to "repo.mod", matching this test's fqn scheme.
+        let engine = QueryEngine::new(db, "file:///".to_string());
+
+        let helper = func("repo.mod.helper", "helper", 0);
+        engine.db().upsert_node(helper).await.unwrap();
+
+        let module = crate::graph::Node {
+            id: None,
+            fqn: "repo.mod".to_string(),
+            uri: URI.to_string(),
+            name: "mod".to_string(),
+            language: "python".to_string(),
+            kind: 2,
+            node_kind: "Module".to_string(),
+            construct: None,
+            container_id: None,
+            range: GRange {
+                start_line: 0,
+                start_col: 0,
+                end_line: i64::MAX,
+                end_col: i64::MAX,
+            },
+            sel: GRange {
+                start_line: 0,
+                start_col: 0,
+                end_line: 0,
+                end_col: 0,
+            },
+            signature: None,
+            documentation: None,
+            detail: None,
+            signature_hash: None,
+            valid: true,
+            orphan: false,
+            generation: 0,
+            is_external: false,
+        };
+        engine.db().upsert_node(module).await.unwrap();
+
+        let mut mock = MockLspQueryClient::new();
+        let helper_item = CallHierarchyItem {
+            name: "helper".into(),
+            kind: 12,
+            uri: URI.into(),
+            range: rng(0, 0, 2, 0),
+            selection_range: rng(0, 4, 0, 10),
+            raw: json!({ "uri": URI, "name": "helper", "data": "h" }),
+        };
+        mock.prepare
+            .insert((URI.to_string(), 0, 4), vec![helper_item.clone()]);
+
+        // The real sentinel, per live observation: a zero-width point at
+        // (0,0) — colliding with `helper`'s own declaration range, which
+        // also starts at (0,0).
+        let module_item = CallHierarchyItem {
+            name: "(module) mod.py".into(),
+            kind: 2,
+            uri: URI.into(),
+            range: rng(0, 0, 0, 0),
+            selection_range: rng(0, 0, 0, 0),
+            raw: json!({ "uri": URI, "name": "(module) mod.py", "data": "m" }),
+        };
+        mock.incoming.insert(
+            helper_item.key(),
+            vec![IncomingCall {
+                from: module_item,
+                from_ranges: vec![rng(4, 0, 4, 6)],
+            }],
+        );
+
+        let (res, timed_out) = engine
+            .find_callers(
+                &SymbolRef::Fqn("repo.mod.helper".into()),
+                &Filter::default(),
+                &Page::default(),
+                Some(&mock),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.items.len(), 1);
+        assert_eq!(
+            res.items[0].node.fqn, "repo.mod",
+            "the sentinel must resolve to the module, not to the real symbol that happens to start at the same position"
+        );
+        assert_eq!(res.items[0].call_sites[0].start.line, 4);
+        assert!(!timed_out);
+    }
+
     #[tokio::test]
     async fn find_callees_materializes_outgoing_calls() {
         let (engine, mock) = scenario().await;

@@ -1496,6 +1496,270 @@ mod tests {
         runtime.shutdown_all().await;
     }
 
+    /// Real pyright, end-to-end: a call at bare module top level (outside
+    /// every `def`/`class`) must resolve to the synthesized module node
+    /// (`FlatSymbol::module_root`) as its caller, not be silently dropped.
+    /// `docs/design/lsp-integration.md` records pyright's `incomingCalls`
+    /// shaping that caller as `(module) sample.py` (`kind=2`) — this pins
+    /// that upstream contract against a real server for the first time (the
+    /// fix itself, `a1a259d`, was previously only regression-tested against
+    /// a hand-mocked LSP response, see `src/query/ops.rs`
+    /// `find_callers_falls_back_to_module_node_for_top_level_call_site`).
+    /// Ignored by default — it needs node/npm and provisions pyright from
+    /// npm on first run.
+    #[ignore = "requires node/npm; provisions pyright from npm on first run"]
+    #[tokio::test]
+    async fn callhierarchy_incoming_from_module_scope_synthesizes_module_caller() {
+        let dir = tempdir().expect("tempdir");
+        let app = dir.path().join("app");
+        fs::create_dir_all(&app).unwrap();
+        // `helper` at line 0; called at bare module scope on line 4, outside
+        // every def/class.
+        fs::write(
+            app.join("mod.py"),
+            "def helper():\n    return 1\n\n\nhelper()\n",
+        )
+        .unwrap();
+
+        let root_uri = root_uri_for(dir.path());
+        let cache_dir = dir.path().join(".semnav");
+        let servers_dir = cache_dir.join("servers");
+        let db_path = cache_dir.join("graph.db");
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let db = DbActor::spawn(&db_path).expect("spawn db");
+        index_language(&db, "python", &root_uri, &servers_dir)
+            .await
+            .expect("index python");
+
+        let engine = QueryEngine::new(db, root_uri.clone());
+        let runtime = QueryRuntime::open(engine, servers_dir);
+
+        let (res, degradation, _refreshing) = runtime
+            .find_callers(
+                &SymbolRef::Fqn("app.mod.helper".to_string()),
+                &Filter::default(),
+                &Page::default(),
+                false,
+            )
+            .await
+            .expect("find_callers through real pyright");
+        assert_eq!(res.items.len(), 1);
+        assert_eq!(
+            res.items[0].node.fqn, "app.mod",
+            "the module-scope call site must resolve to the synthesized module node"
+        );
+        assert_eq!(res.items[0].call_sites[0].start.line, 4);
+        assert!(degradation.is_none());
+
+        runtime.shutdown_all().await;
+    }
+
+    /// Real pyright, end-to-end: a leaf function with no outgoing calls gets
+    /// a **null** `outgoingCalls` response from pyright (not `[]`, per
+    /// `docs/design/lsp-integration.md`'s callHierarchy note) — must resolve
+    /// to no callees, not an error. Ignored by default — it needs node/npm
+    /// and provisions pyright from npm on first run.
+    #[ignore = "requires node/npm; provisions pyright from npm on first run"]
+    #[tokio::test]
+    async fn callees_handles_pyright_null_outgoing_calls_as_empty() {
+        let dir = tempdir().expect("tempdir");
+        let app = dir.path().join("app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join("mod.py"), "def helper():\n    return 1\n").unwrap();
+
+        let root_uri = root_uri_for(dir.path());
+        let cache_dir = dir.path().join(".semnav");
+        let servers_dir = cache_dir.join("servers");
+        let db_path = cache_dir.join("graph.db");
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let db = DbActor::spawn(&db_path).expect("spawn db");
+        index_language(&db, "python", &root_uri, &servers_dir)
+            .await
+            .expect("index python");
+
+        let engine = QueryEngine::new(db, root_uri.clone());
+        let runtime = QueryRuntime::open(engine, servers_dir);
+
+        let (res, degradation) = runtime
+            .find_callees(
+                &SymbolRef::Fqn("app.mod.helper".to_string()),
+                &Filter::default(),
+                &Page::default(),
+                false,
+            )
+            .await
+            .expect("find_callees through real pyright");
+        assert!(
+            res.items.is_empty(),
+            "a leaf function's null outgoingCalls must resolve to no callees, not an error"
+        );
+        assert!(degradation.is_none());
+
+        runtime.shutdown_all().await;
+    }
+
+    /// Real pyright, end-to-end: `find_references`'s anchor-open step
+    /// (`ensure_open`) only opens the *anchor's own* file, never the file
+    /// containing a cross-file usage — this test never calls
+    /// `index_language` at all, so `app/main.py` is never opened via the LSP
+    /// before `find_references` must discover the usage in it.
+    /// `docs/design/lsp-integration.md`'s "pre-emptive didOpen is not
+    /// required" turns out to hold, but only once pyright's own background
+    /// workspace scan (triggered by `workspaceFolders` in `initialize`) has
+    /// had time to complete — **empirically, the very first query
+    /// immediately after acquiring the client only finds the self-reference
+    /// at the declaration site** (`references` was called with
+    /// `include_declaration: true`); the cross-file usage in `main.py` only
+    /// appears once the scan catches up, surfaced here the same way
+    /// `find_callers_cache_first_then_background_refresh_picks_up_new_caller`
+    /// observes convergence: cold call, then a bounded poll loop on repeated
+    /// warm calls. Ignored by default — it needs node/npm and provisions
+    /// pyright from npm on first run.
+    #[ignore = "requires node/npm; provisions pyright from npm on first run"]
+    #[tokio::test]
+    async fn references_resolve_cross_file_without_preemptive_didopen() {
+        let dir = tempdir().expect("tempdir");
+        let app = dir.path().join("app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join("lib.py"), "def helper():\n    return 1\n").unwrap();
+        fs::write(
+            app.join("main.py"),
+            "from app.lib import helper\n\n\ndef caller():\n    return helper()\n",
+        )
+        .unwrap();
+
+        let root_uri = root_uri_for(dir.path());
+        let cache_dir = dir.path().join(".semnav");
+        let servers_dir = cache_dir.join("servers");
+        let db_path = cache_dir.join("graph.db");
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let db = DbActor::spawn(&db_path).expect("spawn db");
+
+        // Seed only the two Nodes the write path needs, directly — never via
+        // `index_language`, so neither file is ever `didOpen`ed by semnav.
+        db.upsert_node(Node {
+            id: None,
+            fqn: "app.lib.helper".to_string(),
+            uri: format!("{}app/lib.py", root_uri),
+            name: "helper".to_string(),
+            language: "python".to_string(),
+            kind: 12,
+            node_kind: "Function".to_string(),
+            construct: None,
+            container_id: None,
+            range: crate::graph::Range {
+                start_line: 0,
+                start_col: 0,
+                end_line: 1,
+                end_col: 12,
+            },
+            sel: crate::graph::Range {
+                start_line: 0,
+                start_col: 4,
+                end_line: 0,
+                end_col: 10,
+            },
+            signature: None,
+            documentation: None,
+            detail: None,
+            signature_hash: None,
+            valid: true,
+            orphan: false,
+            generation: 0,
+            is_external: false,
+        })
+        .await
+        .unwrap();
+
+        db.upsert_node(Node {
+            id: None,
+            fqn: "app.main.caller".to_string(),
+            uri: format!("{}app/main.py", root_uri),
+            name: "caller".to_string(),
+            language: "python".to_string(),
+            kind: 12,
+            node_kind: "Function".to_string(),
+            construct: None,
+            container_id: None,
+            range: crate::graph::Range {
+                start_line: 3,
+                start_col: 0,
+                end_line: 4,
+                end_col: 20,
+            },
+            sel: crate::graph::Range {
+                start_line: 3,
+                start_col: 4,
+                end_line: 3,
+                end_col: 10,
+            },
+            signature: None,
+            documentation: None,
+            detail: None,
+            signature_hash: None,
+            valid: true,
+            orphan: false,
+            generation: 0,
+            is_external: false,
+        })
+        .await
+        .unwrap();
+
+        let engine = QueryEngine::new(db, root_uri.clone());
+        let runtime = QueryRuntime::open(engine, servers_dir);
+
+        let anchor = SymbolRef::Fqn("app.lib.helper".to_string());
+
+        // Cold: blocks on one materialization. pyright's background scan
+        // has typically not yet reached `main.py`, so this is expected to
+        // find only the declaration self-reference.
+        let (first, degradation, _) = runtime
+            .find_references(&anchor, &Filter::default(), &Page::default())
+            .await
+            .expect("find_references through real pyright");
+        assert!(degradation.is_none());
+        assert!(
+            !first.references.is_empty(),
+            "the declaration self-reference is always found"
+        );
+
+        // Warm: served from the (stale) cache immediately, with a
+        // background refresh kicked off.
+        let (_second, _, refreshing) = runtime
+            .find_references(&anchor, &Filter::default(), &Page::default())
+            .await
+            .expect("warm query serves cache");
+        assert!(
+            refreshing,
+            "warm path must report a background refresh in flight"
+        );
+
+        // Give the background refresh time to complete, then requery, until
+        // the cross-file usage in `main.py` shows up.
+        let mut caught_up = None;
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let (res, _, _) = runtime
+                .find_references(&anchor, &Filter::default(), &Page::default())
+                .await
+                .expect("requery");
+            if res.references.len() == 2 {
+                caught_up = Some(res);
+                break;
+            }
+        }
+        let res = caught_up
+            .expect("background refresh must eventually surface the cross-file usage in main.py");
+        let cross_file = res
+            .references
+            .iter()
+            .find(|r| r.node.fqn == "app.main.caller")
+            .expect("one reference group must be the cross-file caller");
+        assert_eq!(cross_file.sites[0].start.line, 4);
+
+        runtime.shutdown_all().await;
+    }
+
     /// Real pyright, end-to-end: `find_callers`'s cache-first + background
     /// refresh (`docs/design/lsp-integration.md`). The first (cold) query
     /// blocks and returns the caller that exists at index time. After a
