@@ -57,6 +57,7 @@ Environment:
 * `SEMNAV_QUERY_TIMEOUT_SECS` — query-time LSP round-trip timeout for `find_references`/`find_callers`/`find_callees`/etc. (default: 150)
 * `SEMNAV_LSP_<LANG>_COMMAND` — override the LSP server binary for `<LANG>` (`PYTHON`/`TYPESCRIPT`/`RUST`, upper-cased `language_name()`), bypassing `PATH`/npm-install resolution entirely — point it at a custom build or wrapper script
 * `SEMNAV_LSP_<LANG>_ARGS` — extra args appended to that language's LSP server startup command (space-separated), e.g. `SEMNAV_LSP_RUST_ARGS="--log-file /tmp/ra.log"`
+* `SEMNAV_LOG` — tracing filter (`RUST_LOG`-style syntax, e.g. `SEMNAV_LOG=semnav=debug`); silent by default (see [docs/design/observability.md](docs/design/observability.md))
 
 All of these are ordinary process environment variables, so an MCP client that launches `semnav serve` (e.g. via `.mcp.json`'s `env` field) can set them per-project without any semnav-specific protocol support.
 

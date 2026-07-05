@@ -252,11 +252,10 @@ Primary mapping (LSP standard values):
 | 2 | Module |
 | 5 | Class |
 | 6 | Method |
-| 9 | Interface |
-| 11 | Function |
-| 12 | Variable |
+| 11 | Interface |
+| 12 | Function |
 | 13 | Variable\* |
-| 22 | Struct |
+| 23 | Struct |
 
 \* `kind_num=13` collides between tsserver's TypeAlias and Variable. When `construct=type` (from hover), it is promoted to `kind_label="TypeAlias"` ([hover-based refinement in language-adapters.md](./language-adapters.md#refinement-via-hover)).
 

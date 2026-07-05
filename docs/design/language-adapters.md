@@ -73,7 +73,7 @@ Directory structure (the contents below are fixed):
 
 * `graph.db` — SQLite (the Graph itself)
 * `servers/` — isolated environments for automatically installed LSP servers
-* `log/` — debug logs
+* `daemon.sock` / `daemon.lock` / `daemon.pid` / `daemon.log` — daemon runtime files (see [daemon-lifecycle.md](./daemon-lifecycle.md) "File layout")
 
 #### Git Pollution Mitigation
 
