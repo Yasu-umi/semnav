@@ -126,6 +126,16 @@ pub trait LspQueryClient {
         character: u32,
         include_declaration: bool,
     ) -> impl Future<Output = Result<Vec<Location>>> + Send;
+    /// `textDocument/implementation` collapsed to `Location[]`. TS-only in
+    /// practice — pyright answers `-32601 Unhandled method`
+    /// (`docs/design/lsp-integration.md`), so callers must gate on the
+    /// anchor's language before calling this.
+    fn implementation(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> impl Future<Output = Result<Vec<Location>>> + Send;
     /// `textDocument/prepareCallHierarchy`.
     fn prepare_call_hierarchy(
         &self,
@@ -235,6 +245,29 @@ impl LspQueryClient for ClientLspQueryClient<'_> {
             }
             let locs: Vec<Location> = serde_json::from_value(raw)?;
             Ok(locs)
+        }
+    }
+
+    fn implementation(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> impl Future<Output = Result<Vec<Location>>> + Send {
+        let client = self.client.clone();
+        let to = self.timeout;
+        let uri = uri.to_string();
+        async move {
+            let raw = timed(
+                to,
+                client.request(
+                    "textDocument/implementation",
+                    Some(pos_params(&uri, line, character)),
+                ),
+                "implementation",
+            )
+            .await?;
+            parse_locations(raw)
         }
     }
 
@@ -506,14 +539,15 @@ type ItemKey = (String, u32, u32);
 /// In-memory client for operation unit tests. Each method looks up its canned
 /// response by position (or by item key for call hierarchy) and returns an
 /// empty/`None` result when none is programmed. `timeout_ops` overrides that:
-/// listed op names (`"definition"`, `"references"`, `"prepareCallHierarchy"`,
-/// `"incomingCalls"`, `"outgoingCalls"`, `"hover"`) fail with a
+/// listed op names (`"definition"`, `"implementation"`, `"references"`,
+/// `"prepareCallHierarchy"`, `"incomingCalls"`, `"outgoingCalls"`, `"hover"`) fail with a
 /// [`QueryTimedOut`] instead, so callers exercising the timeout→degrade path
 /// don't need a real slow server.
 #[cfg(test)]
 #[derive(Default)]
 pub struct MockLspQueryClient {
     pub definitions: HashMap<PosKey, Vec<Location>>,
+    pub implementations: HashMap<PosKey, Vec<Location>>,
     pub references: HashMap<PosKey, Vec<Location>>,
     pub prepare: HashMap<PosKey, Vec<CallHierarchyItem>>,
     pub incoming: HashMap<ItemKey, Vec<IncomingCall>>,
@@ -574,6 +608,27 @@ impl LspQueryClient for MockLspQueryClient {
         async move {
             if timed_out {
                 return Err(Self::timeout_err("definition"));
+            }
+            Ok(out)
+        }
+    }
+
+    fn implementation(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> impl Future<Output = Result<Vec<Location>>> + Send {
+        self.record_call("implementation");
+        let timed_out = self.timeout_ops.contains("implementation");
+        let out = self
+            .implementations
+            .get(&(uri.to_string(), line, character))
+            .cloned()
+            .unwrap_or_default();
+        async move {
+            if timed_out {
+                return Err(Self::timeout_err("implementation"));
             }
             Ok(out)
         }
@@ -750,6 +805,24 @@ mod tests {
         assert_eq!(locs[0].uri, "file:///repo/mod.ts");
         assert_eq!(locs[0].range.start.character, 9);
         assert_eq!(locs[0].range.end.character, 15);
+    }
+
+    /// Real typescript-language-server `textDocument/implementation` on an
+    /// interface method (`tests/fixtures/lsp-probe/`,
+    /// `docs/design/lsp-integration.md`): resolves to the concrete
+    /// implementing class's method. A flat `Location`, not a `LocationLink`,
+    /// even though `implementation` advertises `linkSupport: true` the same
+    /// as `definition` — tsserver just doesn't use it here.
+    #[test]
+    fn parse_locations_matches_captured_tsserver_implementation() {
+        let raw: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/lsp-probe/captures/typescript_implementation_basic.json"
+        ))
+        .unwrap();
+        let locs = parse_locations(raw).unwrap();
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0].uri, "file:///repo/mod.ts");
+        assert_eq!(locs[0].range.start.line, 5);
     }
 
     #[test]

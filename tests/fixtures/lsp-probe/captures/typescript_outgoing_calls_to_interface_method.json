@@ -1,0 +1,52 @@
+[
+  {
+    "fromRanges": [
+      {
+        "end": {
+          "character": 18,
+          "line": 3
+        },
+        "start": {
+          "character": 11,
+          "line": 3
+        }
+      },
+      {
+        "end": {
+          "character": 18,
+          "line": 3
+        },
+        "start": {
+          "character": 11,
+          "line": 3
+        }
+      }
+    ],
+    "to": {
+      "detail": "",
+      "kind": 6,
+      "name": "greet",
+      "range": {
+        "end": {
+          "character": 20,
+          "line": 1
+        },
+        "start": {
+          "character": 4,
+          "line": 1
+        }
+      },
+      "selectionRange": {
+        "end": {
+          "character": 9,
+          "line": 1
+        },
+        "start": {
+          "character": 4,
+          "line": 1
+        }
+      },
+      "uri": "file:///repo/mod.ts"
+    }
+  }
+]
