@@ -42,6 +42,13 @@ pub enum DbCommand {
         fqn: String,
         reply: oneshot::Sender<Result<Option<Node>>>,
     },
+    /// Look up a node by its primary key — e.g. to inspect a resolved
+    /// callee's container (`docs/design/mcp-tools.md` find_callees'
+    /// interface-to-implementation correction).
+    GetNode {
+        id: i64,
+        reply: oneshot::Sender<Result<Option<Node>>>,
+    },
     /// List all valid nodes (optionally narrowed to one language). 0.0.1 graphs
     /// are small and documentSymbol-only, so query tools fetch + filter in Rust
     /// rather than push the predicate into SQL.
@@ -194,6 +201,10 @@ impl DbActor {
                     let res = get_node_by_fqn(&conn, &fqn);
                     let _ = reply.send(res);
                 }
+                DbCommand::GetNode { id, reply } => {
+                    let res = get_node(&conn, id);
+                    let _ = reply.send(res);
+                }
                 DbCommand::ListNodes { language, reply } => {
                     let res = list_nodes(&conn, language.as_deref());
                     let _ = reply.send(res);
@@ -322,6 +333,18 @@ impl DbActor {
                 fqn: fqn.to_string(),
                 reply: tx,
             })
+            .await
+            .map_err(|_| anyhow!("db actor closed"))?;
+        rx.await.map_err(|_| anyhow!("db actor dropped reply"))?
+    }
+
+    /// Look up a node by its primary key, regardless of `valid`/`orphan`
+    /// status — the caller already has the id from a prior lookup and just
+    /// needs that exact row (e.g. a resolved callee's container).
+    pub async fn get_node(&self, id: i64) -> Result<Option<Node>> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbCommand::GetNode { id, reply: tx })
             .await
             .map_err(|_| anyhow!("db actor closed"))?;
         rx.await.map_err(|_| anyhow!("db actor dropped reply"))?
@@ -656,9 +679,29 @@ const SELECT_SQL: &str = r#"
     FROM nodes WHERE fqn = ?1
 "#;
 
+const SELECT_BY_ID_SQL: &str = r#"
+    SELECT id, fqn, uri, name, language, kind, node_kind, construct, container_id,
+           range_start_line, range_start_col, range_end_line, range_end_col,
+           sel_start_line, sel_start_col, sel_end_line, sel_end_col,
+           signature, documentation, detail, signature_hash,
+           valid, orphan, generation, is_external
+    FROM nodes WHERE id = ?1
+"#;
+
 fn get_node_by_fqn(conn: &Connection, fqn: &str) -> Result<Option<Node>> {
     let node = conn
         .query_row(SELECT_SQL, [fqn], node_from_row)
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })?;
+    Ok(node)
+}
+
+fn get_node(conn: &Connection, id: i64) -> Result<Option<Node>> {
+    let node = conn
+        .query_row(SELECT_BY_ID_SQL, [id], node_from_row)
         .map(Some)
         .or_else(|e| match e {
             rusqlite::Error::QueryReturnedNoRows => Ok(None),
@@ -2290,6 +2333,18 @@ mod tests {
             .await
             .unwrap();
         assert!(got.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_node_round_trips_by_id_and_none_for_missing() {
+        let dir = tempdir().expect("tempdir");
+        let actor = DbActor::spawn(&dir.path().join("graph.db")).expect("spawn");
+        let id = actor.upsert_node(node_with("app.C", "C", 0)).await.unwrap();
+
+        let got = actor.get_node(id).await.unwrap().expect("node exists");
+        assert_eq!(got.fqn, "app.C");
+
+        assert!(actor.get_node(id + 1000).await.unwrap().is_none());
     }
 
     #[tokio::test]
