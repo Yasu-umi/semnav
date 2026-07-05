@@ -299,6 +299,12 @@ impl QueryEngine {
             return Ok((vec![callee_id], false));
         }
 
+        // `callee` lives in whatever file declared the interface method —
+        // not necessarily `anchor.uri` — and a query-time client only has
+        // the anchor's file open (`ensure_open`, in the caller above this
+        // one). tsserver answers `implementation` with an empty result for
+        // an unopened document, so it must be opened here too.
+        self.ensure_open(&callee.uri, client).await;
         let (locs, timed_out) = match client
             .implementation(
                 &callee.uri,

@@ -1242,6 +1242,62 @@ mod tests {
         );
     }
 
+    /// Real tsserver, end-to-end: `find_callees` on a function that calls a
+    /// method through an interface-typed parameter must return the
+    /// *concrete* implementing class's method, not the interface's own
+    /// declaration — the fix for the bug `docs/design/mcp-tools.md`
+    /// documented but never implemented (`src/query/resolver.rs`
+    /// `resolve_outgoing_callee`). Ignored by default — it needs node/npm
+    /// and provisions tsserver from npm on first run.
+    #[ignore = "requires node/npm; provisions tsserver from npm on first run"]
+    #[tokio::test]
+    async fn find_callees_corrects_interface_dispatch_to_the_implementing_class() {
+        let dir = tempdir().expect("tempdir");
+        let app = dir.path().join("app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join("mod.ts"),
+            "export interface Greeter {\n    greet(): string;\n}\n\nexport class EnglishGreeter implements Greeter {\n    greet(): string {\n        return \"hello\";\n    }\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            app.join("caller.ts"),
+            "import { Greeter } from \"./mod\";\n\nexport function useGreeter(g: Greeter): string {\n    return g.greet();\n}\n",
+        )
+        .unwrap();
+
+        let root_uri = root_uri_for(dir.path());
+        let cache_dir = dir.path().join(".semnav");
+        let servers_dir = cache_dir.join("servers");
+        let db_path = cache_dir.join("graph.db");
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let db = DbActor::spawn(&db_path).expect("spawn db");
+        index_language(&db, "typescript", &root_uri, &servers_dir)
+            .await
+            .expect("index typescript");
+
+        let engine = QueryEngine::new(db, root_uri.clone());
+        let runtime = QueryRuntime::open(engine, servers_dir);
+
+        let (res, degradation) = runtime
+            .find_callees(
+                &SymbolRef::Fqn("app.caller.useGreeter".to_string()),
+                &Filter::default(),
+                &Page::default(),
+                false,
+            )
+            .await
+            .expect("find_callees through real tsserver");
+        assert!(degradation.is_none());
+        assert_eq!(res.items.len(), 1);
+        assert_eq!(
+            res.items[0].node.fqn, "app.mod.EnglishGreeter.greet",
+            "must resolve to the concrete implementation, not app.mod.Greeter.greet"
+        );
+
+        runtime.shutdown_all().await;
+    }
+
     /// Real pyright, end-to-end: `workspace/symbol` returns an empty array in
     /// this environment (`docs/design/lsp-integration.md`: "not to be
     /// trusted" — semnav works around it by aggregating each file's
