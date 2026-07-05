@@ -167,7 +167,7 @@ output = {
 ```
 
 * Origin: `callHierarchy/outgoingCalls` (`calls` edge)
-* tsserver: `to` sometimes points to the **type-resolved target (an interface method)** → the query side corrects this to the implementing class's method via the `implements` edge ([lsp-integration.md](./lsp-integration.md))
+* tsserver: `to` sometimes points to the **type-resolved target (an interface method)** rather than the concrete implementation actually invoked through it. `src/query/resolver.rs`'s `resolve_outgoing_callee` corrects this: when the resolved callee's container is a TS `Interface` node, it calls `textDocument/implementation` on that method and redirects the `calls` edge to the concrete class's method (persisting an `implements` edge, `interface method → concrete method`, alongside it). Gated on the anchor's language being `"typescript"` — pyright answers `-32601 Unhandled method` for `implementation` ([lsp-integration.md](./lsp-integration.md)), so Python never reaches this path. An empty/failed `implementation` call falls back to the uncorrected interface-method edge, never worse than not having this correction at all. `implements` has no MCP-visible surface of its own — it's internal plumbing that only `find_callees`/`find_call_path` benefit from
 * **Precise content-hash cache, not cache-first + background refresh**: unlike `find_callers`/`find_references`, the callee list is fully determined by the anchor's own file, so a byte-identical anchor file since the last materialization serves an exact cached answer with no LSP call and no `refreshing` field at all ([lsp-integration.md](./lsp-integration.md))
 * **`with_signature`**: best-effort hover backfill of `signature` on each returned `node` — see "Populating `signature`" below
 

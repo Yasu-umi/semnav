@@ -41,6 +41,8 @@ Per the decisions in [mcp-tools.md](./mcp-tools.md) (read_range reads the FS dir
 
 \*\* `find_call_path` doesn't use the `degraded`/`degrade_reason`/`lsp_status` schema at all — an unavailable LSP client is just one more reason the BFS budget runs out, folded into the same `limit_reached` honesty signal it already needs for `max_depth`/`max_lsp_calls` ([mcp-tools.md](./mcp-tools.md) "find_call_path").
 
+`find_callees`/`find_call_path` (they share `materialize_call_edges`) can issue one extra `implementation` round trip on a cache miss, when a TS outgoing call resolves to an interface method ([mcp-tools.md](./mcp-tools.md) find_callees interface-to-implementation correction). This doesn't change either tool's degraded-mode contract above: a failed/timed-out `implementation` call falls back to the uncorrected interface-method edge — the same answer these tools gave before the correction existed — rather than surfacing a new failure mode.
+
 ### degraded response schema
 
 LSP-dependent, on-demand edge tools (find_definition / find_references / find_callers / find_callees) attach the following to cached results when degraded:
