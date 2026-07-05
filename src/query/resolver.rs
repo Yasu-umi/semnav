@@ -236,20 +236,108 @@ impl QueryEngine {
                     let Some(callee_id) = callee.id else {
                         continue;
                     };
-                    for range in call.from_ranges {
-                        let site = Site {
-                            uri: anchor.uri.clone(),
-                            range: lsp_range_to_range(&range),
-                        };
-                        let _ = self
-                            .db
-                            .upsert_edge(located_edge(anchor_id, callee_id, "calls", Some(site)))
-                            .await?;
+                    let (target_ids, correction_timed_out) = self
+                        .resolve_outgoing_callee(anchor, &callee, callee_id, client)
+                        .await?;
+                    timed_out |= correction_timed_out;
+                    for target_id in target_ids {
+                        for range in &call.from_ranges {
+                            let site = Site {
+                                uri: anchor.uri.clone(),
+                                range: lsp_range_to_range(range),
+                            };
+                            let _ = self
+                                .db
+                                .upsert_edge(located_edge(
+                                    anchor_id,
+                                    target_id,
+                                    "calls",
+                                    Some(site),
+                                ))
+                                .await?;
+                        }
                     }
                 }
             }
         }
         Ok(timed_out)
+    }
+
+    /// Resolve an `outgoingCalls` `to` item's *actual* target callee id(s).
+    ///
+    /// tsserver's `outgoingCalls.to` sometimes points to an interface's
+    /// method declaration rather than the concrete class actually invoked
+    /// through it (`docs/design/lsp-integration.md` callHierarchy note,
+    /// `docs/design/mcp-tools.md` find_callees). pyright can't even answer
+    /// `implementation` (`-32601 Unhandled method`, pinned in
+    /// `src/lsp/client.rs`), so the correction is gated to TypeScript —
+    /// language, not capability, since a Python container never has
+    /// `node_kind == "Interface"` anyway.
+    ///
+    /// Falls back to `callee_id` unchanged whenever the correction doesn't
+    /// apply, times out, or resolves to nothing — never worse than the
+    /// uncorrected edge this replaces.
+    async fn resolve_outgoing_callee<C: LspQueryClient>(
+        &self,
+        anchor: &Node,
+        callee: &Node,
+        callee_id: i64,
+        client: &C,
+    ) -> Result<(Vec<i64>, bool)> {
+        if anchor.language != "typescript" {
+            return Ok((vec![callee_id], false));
+        }
+        let is_interface = match callee.container_id {
+            Some(container_id) => self
+                .db
+                .get_node(container_id)
+                .await?
+                .is_some_and(|c| c.node_kind == "Interface"),
+            None => false,
+        };
+        if !is_interface {
+            return Ok((vec![callee_id], false));
+        }
+
+        let (locs, timed_out) = match client
+            .implementation(
+                &callee.uri,
+                callee.sel.start_line as u32,
+                callee.sel.start_col as u32,
+            )
+            .await
+        {
+            Ok(locs) => (locs, false),
+            Err(e) => (Vec::new(), is_timeout(&e)),
+        };
+
+        let mut concrete_ids = Vec::new();
+        for loc in &locs {
+            let Some(concrete) = self
+                .db
+                .find_node_by_position(
+                    &loc.uri,
+                    loc.range.start.line as i64,
+                    loc.range.start.character as i64,
+                )
+                .await?
+            else {
+                continue;
+            };
+            let Some(concrete_id) = concrete.id else {
+                continue;
+            };
+            let _ = self
+                .db
+                .upsert_edge(located_edge(callee_id, concrete_id, "implements", None))
+                .await?;
+            concrete_ids.push(concrete_id);
+        }
+
+        if concrete_ids.is_empty() {
+            return Ok((vec![callee_id], timed_out));
+        }
+        Ok((concrete_ids, timed_out))
     }
 }
 
@@ -330,7 +418,7 @@ pub(super) fn group_by_node(mut neighbors: Vec<Neighbor>) -> Vec<(Node, Vec<Site
 mod tests {
     use super::*;
     use crate::graph::Range;
-    use crate::query::lsp_query::MockLspQueryClient;
+    use crate::query::lsp_query::{CallHierarchyItem, Location, MockLspQueryClient, OutgoingCall};
     use tempfile::tempdir;
 
     fn node(fqn: &str, line: i64) -> Node {
@@ -446,6 +534,223 @@ mod tests {
             .await
             .unwrap();
         assert!(timed_out, "prepareCallHierarchy timeout must be reported");
+    }
+
+    // --- outgoing-call interface-to-implementation correction ---
+
+    fn rng(sl: u32, sc: u32, el: u32, ec: u32) -> LspRange {
+        LspRange {
+            start: crate::indexer::LspPosition {
+                line: sl,
+                character: sc,
+            },
+            end: crate::indexer::LspPosition {
+                line: el,
+                character: ec,
+            },
+        }
+    }
+
+    fn ts_node(
+        fqn: &str,
+        name: &str,
+        node_kind: &str,
+        line: i64,
+        container_id: Option<i64>,
+    ) -> Node {
+        let mut n = node(fqn, line);
+        n.name = name.to_string();
+        n.node_kind = node_kind.to_string();
+        n.language = "typescript".to_string();
+        n.container_id = container_id;
+        n.uri = "file:///m.ts".to_string();
+        n
+    }
+
+    /// A TS `Greeter` interface (with a `greet` method) and an
+    /// `EnglishGreeter` class implementing it (with its own `greet`), plus a
+    /// `caller` function whose `outgoingCalls` mock response points `to` the
+    /// interface's method — the exact shape observed live
+    /// (`tests/fixtures/lsp-probe/captures/typescript_outgoing_calls_to_interface_method.json`).
+    /// Returns `(engine, mock, anchor, anchor_id, interface_method_id, concrete_method_id)`.
+    async fn interface_dispatch_scenario() -> (QueryEngine, MockLspQueryClient, Node, i64, i64, i64)
+    {
+        let engine = engine();
+        let caller = ts_node("repo.caller", "caller", "Function", 10, None);
+        let anchor_id = engine.db().upsert_node(caller.clone()).await.unwrap();
+
+        let mut interface = ts_node("repo.Greeter", "Greeter", "Interface", 0, None);
+        // Span wider than the default 1-line `node()` range so it strictly
+        // *contains* (not ties with) `interface_method`'s range below —
+        // `find_node_by_position`'s innermost-span tie-break needs a real
+        // size difference to pick the nested method over its container.
+        interface.range.end_line = 3;
+        let interface_id = engine.db().upsert_node(interface).await.unwrap();
+        let interface_method = ts_node(
+            "repo.Greeter.greet",
+            "greet",
+            "Method",
+            1,
+            Some(interface_id),
+        );
+        let interface_method_id = engine.db().upsert_node(interface_method).await.unwrap();
+
+        let mut concrete_class = ts_node("repo.EnglishGreeter", "EnglishGreeter", "Class", 4, None);
+        // Same reasoning as `interface` above — must strictly contain
+        // `concrete_method`'s range, not tie with it.
+        concrete_class.range.end_line = 7;
+        let concrete_class_id = engine.db().upsert_node(concrete_class).await.unwrap();
+        let concrete_method = ts_node(
+            "repo.EnglishGreeter.greet",
+            "greet",
+            "Method",
+            5,
+            Some(concrete_class_id),
+        );
+        let concrete_method_id = engine.db().upsert_node(concrete_method).await.unwrap();
+
+        let mut mock = MockLspQueryClient::new();
+        let caller_item = CallHierarchyItem {
+            name: "caller".into(),
+            kind: 12,
+            uri: "file:///m.ts".into(),
+            range: rng(10, 0, 12, 0),
+            selection_range: rng(10, 0, 10, 4),
+            raw: serde_json::json!({ "uri": "file:///m.ts", "name": "caller" }),
+        };
+        mock.prepare.insert(
+            ("file:///m.ts".to_string(), 10, 0),
+            vec![caller_item.clone()],
+        );
+        let interface_method_item = CallHierarchyItem {
+            name: "greet".into(),
+            kind: 6,
+            uri: "file:///m.ts".into(),
+            range: rng(1, 0, 1, 5),
+            selection_range: rng(1, 0, 1, 4),
+            raw: serde_json::json!({ "uri": "file:///m.ts", "name": "greet" }),
+        };
+        mock.outgoing.insert(
+            caller_item.key(),
+            vec![OutgoingCall {
+                to: interface_method_item,
+                from_ranges: vec![rng(11, 4, 11, 9)],
+            }],
+        );
+        mock.implementations.insert(
+            ("file:///m.ts".to_string(), 1, 0),
+            vec![Location {
+                uri: "file:///m.ts".to_string(),
+                range: rng(5, 0, 5, 4),
+            }],
+        );
+
+        (
+            engine,
+            mock,
+            caller,
+            anchor_id,
+            interface_method_id,
+            concrete_method_id,
+        )
+    }
+
+    #[tokio::test]
+    async fn outgoing_call_to_interface_method_is_corrected_to_the_implementing_class() {
+        let (engine, mock, anchor, anchor_id, interface_method_id, concrete_method_id) =
+            interface_dispatch_scenario().await;
+
+        let timed_out = engine
+            .materialize_call_edges(anchor_id, &anchor, Direction::Outgoing, &mock)
+            .await
+            .unwrap();
+        assert!(!timed_out);
+
+        let callees = engine
+            .db()
+            .get_neighbors(anchor_id, "calls", Direction::Outgoing)
+            .await
+            .unwrap();
+        assert_eq!(callees.len(), 1);
+        assert_eq!(
+            callees[0].0.id,
+            Some(concrete_method_id),
+            "the calls edge must point at the concrete method, not the interface's"
+        );
+
+        let implements = engine
+            .db()
+            .get_neighbors(interface_method_id, "implements", Direction::Outgoing)
+            .await
+            .unwrap();
+        assert_eq!(implements.len(), 1);
+        assert_eq!(implements[0].0.id, Some(concrete_method_id));
+    }
+
+    #[tokio::test]
+    async fn outgoing_call_to_interface_method_is_not_corrected_for_python() {
+        let (engine, mock, mut anchor, anchor_id, interface_method_id, _concrete_method_id) =
+            interface_dispatch_scenario().await;
+        anchor.language = "python".to_string();
+        // Re-persist the anchor with the python language so `find_node_by_position`
+        // (used elsewhere) stays consistent; the correction reads `anchor.language`
+        // from the argument passed to `materialize_call_edges` directly, so this
+        // update isn't strictly required for the gate itself, but keeps the
+        // fixture honest.
+        engine.db().upsert_node(anchor.clone()).await.unwrap();
+
+        let timed_out = engine
+            .materialize_call_edges(anchor_id, &anchor, Direction::Outgoing, &mock)
+            .await
+            .unwrap();
+        assert!(!timed_out);
+
+        let callees = engine
+            .db()
+            .get_neighbors(anchor_id, "calls", Direction::Outgoing)
+            .await
+            .unwrap();
+        assert_eq!(callees.len(), 1);
+        assert_eq!(
+            callees[0].0.id,
+            Some(interface_method_id),
+            "a non-TypeScript anchor must never call `implementation`, so the edge stays uncorrected"
+        );
+
+        let implements = engine
+            .db()
+            .get_neighbors(interface_method_id, "implements", Direction::Outgoing)
+            .await
+            .unwrap();
+        assert!(
+            implements.is_empty(),
+            "no implements edge without ever calling implementation"
+        );
+    }
+
+    #[tokio::test]
+    async fn outgoing_call_to_interface_method_falls_back_when_implementation_is_empty() {
+        let (engine, mut mock, anchor, anchor_id, interface_method_id, _concrete_method_id) =
+            interface_dispatch_scenario().await;
+        mock.implementations.clear();
+
+        let timed_out = engine
+            .materialize_call_edges(anchor_id, &anchor, Direction::Outgoing, &mock)
+            .await
+            .unwrap();
+        assert!(!timed_out);
+
+        let callees = engine
+            .db()
+            .get_neighbors(anchor_id, "calls", Direction::Outgoing)
+            .await
+            .unwrap();
+        assert_eq!(callees.len(), 1);
+        assert_eq!(
+            callees[0].0.id,
+            Some(interface_method_id),
+            "an empty implementation() result must fall back to the interface method, never worse than pre-fix behavior"
+        );
     }
 
     #[test]
