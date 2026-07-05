@@ -1041,7 +1041,12 @@ const UPDATE_NODE_SQL: &str = r#"
 "#;
 
 const INVALIDATE_EDGES_SQL: &str = "UPDATE edges SET valid = 0 WHERE src_id = ?1 OR dst_id = ?1";
-const ORPHAN_NODE_SQL: &str = "UPDATE nodes SET orphan = 1, valid = 0 WHERE id = ?1";
+// Restores `range_start_line` (see the Pass-3 sentinel parking above) to its
+// true pre-reconcile value — an orphaned-but-not-deleted row stays eligible
+// for Pass 2's line-drift rename/revival heuristic on a future reconcile,
+// which needs its real position, not the transient sentinel.
+const ORPHAN_NODE_SQL: &str =
+    "UPDATE nodes SET orphan = 1, valid = 0, range_start_line = ?2 WHERE id = ?1";
 const DELETE_NODE_SQL: &str = "DELETE FROM nodes WHERE id = ?1";
 
 /// The trailing-name-stripped fqn (`a.b.C.method` -> `a.b.C`), used to require
@@ -1107,6 +1112,29 @@ fn reconcile_file_symbols_tx(
     )?;
 
     let old_nodes = nodes_by_uri(tx, uri)?;
+
+    // Park every existing row's physical key (`idx_nodes_phys`) on a sentinel
+    // derived from its own (globally unique) id before Pass 3 starts writing
+    // real target positions. `idx_nodes_phys` only keys on (uri, line, col,
+    // name) — not fqn or kind — so two unrelated same-named symbols (e.g.
+    // `Foo::new`/`Bar::new`) that swap positions across a single reconcile
+    // (one moving onto the line the other used to occupy) would otherwise hit
+    // a real `UNIQUE constraint failed` mid-loop: `UPDATE_NODE_SQL` below has
+    // no `ON CONFLICT` fallback (unlike `UPSERT_SQL`'s insert path), because a
+    // plain `UPDATE` can't declare one for a non-`fqn` unique index. Parking
+    // first makes every row's key trivially unique (ids never collide) before
+    // any row is moved to a real, potentially-still-occupied target, so
+    // ordering within Pass 3 can no longer matter. Negative lines are outside
+    // any real symbol's range and only ever observed transiently within this
+    // transaction — Pass 3/4 below give every parked row a real final value
+    // (or restore its original one; see `ORPHAN_NODE_SQL`) before commit.
+    if !old_nodes.is_empty() {
+        tx.execute(
+            "UPDATE nodes SET range_start_line = -id WHERE uri = ?1",
+            params![uri],
+        )?;
+    }
+
     let mut old_used = vec![false; old_nodes.len()];
     let mut assigned: Vec<Option<usize>> = vec![None; symbols.len()];
 
@@ -1262,7 +1290,7 @@ fn reconcile_file_symbols_tx(
             tx.execute(DELETE_NODE_SQL, params![old_id])?;
             outcome.deleted += 1;
         } else {
-            tx.execute(ORPHAN_NODE_SQL, params![old_id])?;
+            tx.execute(ORPHAN_NODE_SQL, params![old_id, old.range.start_line])?;
             outcome.orphaned += 1;
         }
     }
@@ -1563,6 +1591,56 @@ mod tests {
         assert_eq!(got.id, Some(id));
         assert!(got.valid);
         assert!(!got.orphan);
+    }
+
+    /// Two same-named methods on different types (`Foo::new`/`Bar::new` — a
+    /// common pattern, `idx_nodes_phys` only keys on `name`, not `fqn`) swap
+    /// which one comes first in the file. `Foo::new` moves down onto the line
+    /// `Bar::new` currently occupies; `Bar::new` moves further down. Applying
+    /// updates one row at a time in symbol order means `Foo::new`'s row is
+    /// written to `Bar::new`'s still-unmoved physical key before `Bar::new`'s
+    /// own row gets out of the way — a real edit pattern this session
+    /// actually hit (`semnav`'s own `src/graph/db.rs`, causing every
+    /// subsequent watcher reconcile of that file to fail with `UNIQUE
+    /// constraint failed` until this was fixed).
+    #[tokio::test]
+    async fn reconcile_survives_a_same_name_position_swap() {
+        let dir = tempdir().expect("tempdir");
+        let actor = DbActor::spawn(&dir.path().join("graph.db")).expect("spawn");
+        let uri = "file:///app/mod.py";
+
+        let mut foo_new = node_with("app.Foo.new", "new", 0);
+        foo_new.signature_hash = Some("hashFoo".to_string());
+        actor.upsert_node(foo_new).await.unwrap();
+        let mut bar_new = node_with("app.Bar.new", "new", 5);
+        bar_new.signature_hash = Some("hashBar".to_string());
+        actor.upsert_node(bar_new).await.unwrap();
+
+        // Same fqns (exact-match in Pass 1), but `Foo::new` now sits where
+        // `Bar::new` used to be, and `Bar::new` moved further down — in
+        // symbol/document order, `Foo::new` (now first) is processed before
+        // `Bar::new` vacates line 5.
+        let incoming = vec![
+            sym("app.Foo.new", "new", 12, "function", 5, "hashFoo", None),
+            sym("app.Bar.new", "new", 12, "function", 10, "hashBar", None),
+        ];
+        let outcome = actor
+            .reconcile_file_symbols(uri, "python", false, incoming)
+            .await
+            .expect("reconcile survives the transient physical-key collision");
+        assert_eq!(
+            outcome,
+            ReconcileOutcome {
+                unchanged: 2,
+                ..Default::default()
+            },
+            "same fqn/hash, only position moved — both read as unchanged"
+        );
+
+        let foo = actor.get_node_by_fqn("app.Foo.new").await.unwrap().unwrap();
+        let bar = actor.get_node_by_fqn("app.Bar.new").await.unwrap().unwrap();
+        assert_eq!(foo.range.start_line, 5);
+        assert_eq!(bar.range.start_line, 10);
     }
 
     #[tokio::test]
