@@ -47,7 +47,7 @@ Reason both modes are supported: agents want to ask both "what's the definition 
 
 `find_references`/`find_callers`/`find_callees`/`find_call_path` all resolve a `SymbolRef::Fqn` via the same exact-match lookup. Since a caller often knows a symbol's short name but not its full FQN, a bare or wrong-prefixed `fqn` would otherwise return an empty result indistinguishable from "this symbol genuinely has zero callers/references" (issue #3).
 
-Whenever that lookup finds no anchor at all, the response's `hint_fqns` (`find_call_path`: `from_hint_fqns`/`to_hint_fqns`, evaluated independently per endpoint) is filled with FQNs sharing the requested name's last dot-segment — the same signal `find_symbol`'s default `match="segment"` uses — capped at 10 entries. An empty `hint_fqns` on a no-anchor result means no similarly-named symbol exists either; a non-empty one is a pointer to retry with `find_symbol` or the suggested FQN directly. `hint_fqns` never applies to `at`: an unresolvable position is a normal LSP-null outcome, not a naming problem.
+Whenever that lookup finds no anchor at all, the response's `hint_fqns` (`find_call_path`: `from_hint_fqns`/`to_hint_fqns`, evaluated independently per endpoint) is filled with FQNs sharing the requested name's last dot-segment — the same signal `find_symbol`'s default `match="segment"` uses — capped at 10 entries. If that exact-segment pass finds nothing, it falls back to `match="fuzzy"` on the same leaf, so a typo'd name (e.g. `helpr`) still surfaces a hint instead of looking identical to "no such symbol exists". An empty `hint_fqns` on a no-anchor result means no similarly-named symbol exists either; a non-empty one is a pointer to retry with `find_symbol` or the suggested FQN directly. `hint_fqns` never applies to `at`: an unresolvable position is a normal LSP-null outcome, not a naming problem.
 
 ### Filter (optional parameter for all find_* tools)
 
@@ -97,7 +97,7 @@ Node = {
 ```
 input  = {
   pattern:         string,
-  match?:          "segment" | "contains" | "exact" = "segment",
+  match?:          "segment" | "contains" | "exact" | "fuzzy" = "segment",
   ignore_case?:    bool = false,
   brief?:          bool = false,
   with_signature?: bool = false,
@@ -108,6 +108,7 @@ output = { nodes: Node[], fqns: string[], next_cursor?: string }
 * **`match="segment"` (default)**: matches against **each segment** of the FQN split by its delimiter. `save` hits `app.repo.save` (trailing `save`), but not `preserve`. A default that's neither too broad nor too narrow
 * `contains`: substring match (`%save%`). Nothing is missed, but it also hits `preserve`
 * `exact`: exact FQN match
+* `fuzzy`: typo-tolerant per-segment match via normalized Levenshtein similarity (threshold `0.7`, `src/query/filter.rs`). `helpr` hits `app.repo.helper`, but stays far enough from unrelated short names (e.g. `main`) not to false-positive
 * **`brief`**: when `true`, the response fills `fqns` (just the matched FQN strings) and leaves `nodes` empty, instead of the reverse. A wide `match="contains"` pattern can page through hundreds of full `Node`s (`range`/`signature`/`documentation`/...) and blow past a response token budget; `brief` lets a caller gauge match count or narrow the pattern first, before paying for full metadata.
 * **`with_signature`**: best-effort hover backfill of `signature` for each returned node that doesn't already have one — see "Populating `signature`" below. No-op when `brief` is set (there are no `Node`s to enrich).
 

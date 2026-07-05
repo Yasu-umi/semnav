@@ -22,7 +22,19 @@ pub enum MatchMode {
     Contains,
     /// Exact full-fqn match.
     Exact,
+    /// Typo-tolerant match against each dot-delimited segment, using
+    /// normalized Levenshtein similarity (`FUZZY_SIMILARITY_THRESHOLD`).
+    /// Same per-segment shape as `Segment`, so a misspelled short name (e.g.
+    /// `helpr`) still finds `app.repo.helper`.
+    Fuzzy,
 }
+
+/// Minimum `strsim::normalized_levenshtein` similarity (in `[0.0, 1.0]`) for
+/// `MatchMode::Fuzzy` to consider a segment a match. Chosen empirically: high
+/// enough that unrelated short names (e.g. `main` vs `helper`) don't
+/// collide, low enough to absorb a single-character typo/transposition in a
+/// typical identifier length.
+const FUZZY_SIMILARITY_THRESHOLD: f64 = 0.7;
 
 impl MatchMode {
     /// Apply this mode to an fqn. `ignore_case` folds ASCII case for both sides.
@@ -38,7 +50,23 @@ impl MatchMode {
                     fqn.contains(pattern)
                 }
             }
+            Self::Fuzzy => fqn
+                .split('.')
+                .any(|seg| fuzzy_eq(pattern, seg, ignore_case)),
         }
+    }
+}
+
+/// Whether `a`/`b` are similar enough for `MatchMode::Fuzzy`, per
+/// `FUZZY_SIMILARITY_THRESHOLD`. `ignore_case` ASCII-folds both sides first,
+/// matching `eq`'s convention.
+fn fuzzy_eq(a: &str, b: &str, ignore_case: bool) -> bool {
+    if ignore_case {
+        let a = a.to_ascii_lowercase();
+        let b = b.to_ascii_lowercase();
+        strsim::normalized_levenshtein(&a, &b) >= FUZZY_SIMILARITY_THRESHOLD
+    } else {
+        strsim::normalized_levenshtein(a, b) >= FUZZY_SIMILARITY_THRESHOLD
     }
 }
 
@@ -230,6 +258,24 @@ mod tests {
     fn match_mode_exact_is_whole_fqn() {
         assert!(MatchMode::Exact.matches("app.repo.Repo", false, "app.repo.Repo"));
         assert!(!MatchMode::Exact.matches("Repo", false, "app.repo.Repo"));
+    }
+
+    #[test]
+    fn match_mode_fuzzy_tolerates_a_single_typo() {
+        assert!(MatchMode::Fuzzy.matches("helpr", false, "app.repo.helper"));
+        assert!(MatchMode::Fuzzy.matches("Repo", false, "app.repo.Repo"));
+    }
+
+    #[test]
+    fn match_mode_fuzzy_rejects_unrelated_names() {
+        assert!(!MatchMode::Fuzzy.matches("main", false, "app.repo.Repo"));
+        assert!(!MatchMode::Fuzzy.matches("totally_unrelated", false, "app.repo.helper"));
+    }
+
+    #[test]
+    fn match_mode_fuzzy_ignore_case_folds_ascii() {
+        assert!(MatchMode::Fuzzy.matches("HELPR", true, "app.repo.helper"));
+        assert!(!MatchMode::Fuzzy.matches("HELPR", false, "app.repo.helper"));
     }
 
     #[test]

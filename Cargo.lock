@@ -1006,6 +1006,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "strsim",
  "tempfile",
  "tokio",
  "tracing",

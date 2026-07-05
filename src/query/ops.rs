@@ -37,16 +37,23 @@ impl QueryEngine {
     /// (`docs/design/mcp-tools.md` "SymbolRef", issue #3). Only ever invoked
     /// on the already-rare anchor-not-found path, so the extra graph read
     /// doesn't cost anything on the common case.
+    ///
+    /// Falls back to `MatchMode::Fuzzy` on the leaf when the exact-segment
+    /// pass finds nothing, so a typo'd name (e.g. `helpr`) still surfaces a
+    /// hint instead of looking identical to "no such symbol exists".
     async fn hint_fqns_for(&self, fqn: &str) -> Result<Vec<String>> {
         let leaf = fqn.rsplit('.').next().unwrap_or(fqn);
-        let mut fqns: Vec<String> = self
-            .db
-            .list_nodes(None)
-            .await?
-            .into_iter()
-            .filter(|n| !n.is_external && MatchMode::Segment.matches(leaf, false, &n.fqn))
-            .map(|n| n.fqn)
-            .collect();
+        let nodes = self.db.list_nodes(None).await?;
+        let segment_matches =
+            |n: &&Node| !n.is_external && MatchMode::Segment.matches(leaf, false, &n.fqn);
+        let mut matched: Vec<&Node> = nodes.iter().filter(segment_matches).collect();
+        if matched.is_empty() {
+            matched = nodes
+                .iter()
+                .filter(|n| !n.is_external && MatchMode::Fuzzy.matches(leaf, false, &n.fqn))
+                .collect();
+        }
+        let mut fqns: Vec<String> = matched.into_iter().map(|n| n.fqn.clone()).collect();
         fqns.sort();
         fqns.dedup();
         fqns.truncate(FQN_HINT_LIMIT);
@@ -907,6 +914,43 @@ mod tests {
         assert_eq!(second.nodes.len(), 1);
         assert_eq!(second.nodes[0].fqn, "repo.helper");
         assert!(second.next_cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn find_symbol_fuzzy_tolerates_a_typo() {
+        let (engine, _mock) = scenario().await;
+        let res = engine
+            .find_symbol(
+                "helpr",
+                MatchMode::Fuzzy,
+                false,
+                false,
+                &Filter::default(),
+                &Page::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.nodes.len(), 1);
+        assert_eq!(res.nodes[0].fqn, "repo.helper");
+    }
+
+    #[tokio::test]
+    async fn hint_fqns_falls_back_to_fuzzy_for_a_typo_d_bare_name() {
+        let (engine, _mock) = scenario().await;
+        // "helpr" has no exact-segment match at all, so the segment pass
+        // alone would leave `hint_fqns` empty; the fuzzy fallback should
+        // still surface `repo.helper`.
+        let (res, _timed_out) = engine
+            .find_references(
+                &SymbolRef::Fqn("helpr".into()),
+                &Filter::default(),
+                &Page::default(),
+                None::<&MockLspQueryClient>,
+            )
+            .await
+            .unwrap();
+        assert!(res.references.is_empty());
+        assert_eq!(res.hint_fqns, vec!["repo.helper".to_string()]);
     }
 
     #[tokio::test]
