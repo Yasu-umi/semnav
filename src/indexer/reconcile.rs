@@ -18,6 +18,8 @@
 //! retried (github.com/Yasu-umi/semnav#7).
 
 use std::collections::HashSet;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::time::Duration;
 
@@ -161,17 +163,57 @@ enum DriftAttempt {
     LspUnavailable,
 }
 
+/// `index_meta` key holding `uri`'s content fingerprint as of its last
+/// committed startup-drift reconcile.
+fn content_hash_meta_key(uri: &str) -> String {
+    format!("startup_drift_content_hash::{uri}")
+}
+
+/// Non-cryptographic content fingerprint (same `DefaultHasher` pattern as
+/// `signature_fingerprint`) — this only has to detect "did the bytes change",
+/// not resist tampering. `None` if `uri` doesn't currently exist on disk: a
+/// missing file must never be treated as "unchanged", since that's exactly
+/// the deletion the orphan path needs to see.
+async fn current_content_hash(uri: &str) -> Option<String> {
+    let bytes = tokio::fs::read(uri_to_path(uri)).await.ok()?;
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Some(format!("{:016x}", hasher.finish()))
+}
+
 /// Like [`reconcile_uri`], but for the startup-drift pass specifically: an
 /// empty `documentSymbol` result isn't trusted as-is when the uri previously
 /// had real symbols, since (unlike the live watcher) this fetch isn't
 /// triggered by an actual edit — it's a cold probe that can race the LSP
 /// server's own warm-up scan.
+///
+/// Before paying for that LSP round-trip at all, compares `uri`'s current
+/// on-disk content hash against the one recorded the last time this uri was
+/// committed here (`docs/design/daemon-lifecycle.md` "Startup drift
+/// reconciliation"): a hash match means the file provably hasn't changed
+/// since then, so it's reported as a no-op `Committed` without ever calling
+/// `fetch_uri_symbols` — the common case when the daemon was down only
+/// briefly. A missing file (deleted while unwatched) never matches by
+/// definition, so it always falls through to the real fetch and the orphan
+/// path it drives.
 async fn reconcile_uri_for_startup_drift(
     db: &DbActor,
     query_runtime: &QueryRuntime,
     root_uri: &str,
     uri: &str,
 ) -> Result<DriftAttempt> {
+    if select_for_uri(uri).is_none() {
+        return Ok(DriftAttempt::Committed);
+    }
+
+    let meta_key = content_hash_meta_key(uri);
+    let current_hash = current_content_hash(uri).await;
+    if let Some(hash) = &current_hash
+        && db.get_meta(&meta_key).await?.as_deref() == Some(hash.as_str())
+    {
+        return Ok(DriftAttempt::Committed);
+    }
+
     let fetched = match fetch_uri_symbols(query_runtime, root_uri, uri).await? {
         FetchOutcome::Unsupported => return Ok(DriftAttempt::Committed),
         FetchOutcome::LspUnavailable => return Ok(DriftAttempt::LspUnavailable),
@@ -190,6 +232,12 @@ async fn reconcile_uri_for_startup_drift(
         fetched.reconcile_symbols,
     )
     .await?;
+    // A missing file's hash is `None`, not a real fingerprint — recorded as
+    // an empty string, which a `DefaultHasher` fingerprint (always 16 hex
+    // digits) can never produce, so a later file recreated with byte-for-byte
+    // identical content still gets reconciled instead of wrongly skipped.
+    db.set_meta(&meta_key, current_hash.as_deref().unwrap_or(""))
+        .await?;
     Ok(DriftAttempt::Committed)
 }
 
@@ -331,40 +379,100 @@ mod tests {
     /// Forces `acquire_for_watcher` to fail on its very first (synchronous
     /// spawn) attempt by pointing `SEMNAV_LSP_RUST_COMMAND` at a nonexistent
     /// binary (`src/adapters/provision.rs::command_override_from_env`) —
-    /// no real rust-analyzer process, no network, no backoff wait. Proves
-    /// `reconcile_uri_for_startup_drift` reports `LspUnavailable` for a
-    /// dead-on-arrival LSP server instead of silently treating it as
-    /// `Committed` (github.com/Yasu-umi/semnav#7 defect 2).
+    /// no real rust-analyzer process, no network, no backoff wait. All three
+    /// scenarios below share this one dead-on-arrival fixture and run inside
+    /// a single test function/env-var scope rather than three separate
+    /// `#[tokio::test]`s: env vars are global process state, and `cargo test`
+    /// runs tests concurrently by default, so splitting them would let one
+    /// test's `remove_var` race another's `set_var`.
     #[tokio::test]
-    async fn reconcile_uri_for_startup_drift_flags_lsp_unavailable_instead_of_committing() {
-        let dir = tempdir().expect("tempdir");
-        let db = DbActor::spawn(&dir.path().join("graph.db")).expect("spawn db");
-        let engine = QueryEngine::new(db.clone(), "file:///root".to_string());
-        let query_runtime = QueryRuntime::open(engine, dir.path().join("servers"));
-
-        // One test per var, set→check→cleanup within the same test function —
-        // env vars are global process state, racy across parallel tests if
-        // split across functions touching the same var.
+    async fn reconcile_uri_for_startup_drift_lsp_unavailable_and_content_hash_gating() {
         unsafe {
             std::env::set_var(
                 "SEMNAV_LSP_RUST_COMMAND",
                 "/nonexistent/semnav-test-rust-analyzer",
             );
         }
-        let result = reconcile_uri_for_startup_drift(
-            &db,
-            &query_runtime,
-            "file:///root",
-            "file:///root/lib.rs",
-        )
-        .await;
+
+        // Scenario 1: no file on disk at all (github.com/Yasu-umi/semnav#7
+        // defect 2) — must report LspUnavailable, not silently Committed.
+        {
+            let dir = tempdir().expect("tempdir");
+            let db = DbActor::spawn(&dir.path().join("graph.db")).expect("spawn db");
+            let engine = QueryEngine::new(db.clone(), "file:///root".to_string());
+            let query_runtime = QueryRuntime::open(engine, dir.path().join("servers"));
+
+            let result = reconcile_uri_for_startup_drift(
+                &db,
+                &query_runtime,
+                "file:///root",
+                "file:///root/lib.rs",
+            )
+            .await;
+            assert!(
+                matches!(result, Ok(DriftAttempt::LspUnavailable)),
+                "expected LspUnavailable for a dead-on-arrival LSP server, got {result:?}"
+            );
+        }
+
+        // Scenario 2: file exists but no prior content hash is recorded (as
+        // if seen for the first time) — must still attempt the fetch rather
+        // than wrongly skip, proven by the same dead-on-arrival server
+        // coming back LspUnavailable rather than Committed.
+        {
+            let dir = tempdir().expect("tempdir");
+            let db = DbActor::spawn(&dir.path().join("graph.db")).expect("spawn db");
+            let root_uri = crate::indexer::path_to_uri(dir.path());
+            let engine = QueryEngine::new(db.clone(), root_uri.clone());
+            let query_runtime = QueryRuntime::open(engine, dir.path().join("servers"));
+
+            let file_path = dir.path().join("lib.rs");
+            tokio::fs::write(&file_path, b"fn main() {}")
+                .await
+                .expect("write fixture file");
+            let uri = crate::indexer::path_to_uri(&file_path);
+
+            let result =
+                reconcile_uri_for_startup_drift(&db, &query_runtime, &root_uri, &uri).await;
+            assert!(
+                matches!(result, Ok(DriftAttempt::LspUnavailable)),
+                "no prior hash recorded must fall through to a real fetch attempt, got {result:?}"
+            );
+        }
+
+        // Scenario 3: a content hash matching the file's current bytes is
+        // already recorded — must skip straight to Committed without ever
+        // touching the (dead-on-arrival) LSP server.
+        {
+            let dir = tempdir().expect("tempdir");
+            let db = DbActor::spawn(&dir.path().join("graph.db")).expect("spawn db");
+            let root_uri = crate::indexer::path_to_uri(dir.path());
+            let engine = QueryEngine::new(db.clone(), root_uri.clone());
+            let query_runtime = QueryRuntime::open(engine, dir.path().join("servers"));
+
+            let file_path = dir.path().join("lib.rs");
+            tokio::fs::write(&file_path, b"fn main() {}")
+                .await
+                .expect("write fixture file");
+            let uri = crate::indexer::path_to_uri(&file_path);
+            let hash = current_content_hash(&uri)
+                .await
+                .expect("fixture file must hash");
+            db.set_meta(&content_hash_meta_key(&uri), &hash)
+                .await
+                .expect("seed content hash");
+
+            let result =
+                reconcile_uri_for_startup_drift(&db, &query_runtime, &root_uri, &uri).await;
+            assert!(
+                matches!(result, Ok(DriftAttempt::Committed)),
+                "a content-hash match must skip straight to Committed without touching the \
+                 (dead-on-arrival) LSP server, got {result:?}"
+            );
+        }
+
         unsafe {
             std::env::remove_var("SEMNAV_LSP_RUST_COMMAND");
         }
-
-        assert!(
-            matches!(result, Ok(DriftAttempt::LspUnavailable)),
-            "expected LspUnavailable for a dead-on-arrival LSP server, got {result:?}"
-        );
     }
 }
