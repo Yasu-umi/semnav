@@ -3,6 +3,41 @@
 Notable changes per release. The release workflow uses the matching section
 as the GitHub release notes (auto-generated notes are the fallback).
 
+## v0.0.2 (2026-07-10)
+
+### Added
+
+- **Tool discoverability**: `serve`/`daemon` advertise a "prefer these tools
+  over grep/Read" directive via the MCP `InitializeResult.instructions` field,
+  which reaches the agent even when a client defers a connected server's
+  tools behind an explicit tool-search step.
+- **fqn resolution hints**: `find_references`/`find_callers`/`find_callees`/
+  `find_call_path` return `hint_fqns` (segment match, falling back to
+  typo-tolerant fuzzy match) when a `fqn` resolves to no anchor at all,
+  instead of an empty result indistinguishable from "genuinely zero
+  callers/references".
+- **`implements` edge for TypeScript**: `find_callees` now resolves a call
+  through a TS interface method to the implementing class instead of the
+  interface declaration itself.
+- **Daemon reconnect**: `serve` transparently reconnects to a fresh daemon if
+  the one it was using disappears mid-session (idle timeout, an explicit
+  `daemon stop`, or a crash), instead of failing every subsequent tool call
+  for the rest of that `serve` process's life.
+- **Faster daemon restart**: the startup-drift reconcile pass skips a file's
+  LSP round-trip entirely when its on-disk content hash matches the last
+  committed reconcile, instead of re-fetching every file on every restart.
+
+### Fixed
+
+- Daemon restart now reconciles filesystem changes made while no daemon was
+  running, which previously stayed invisible to the graph (#4).
+- Reconciling a file no longer hits a `UNIQUE` constraint failure when
+  same-named symbols swap position (#5).
+- Daemon restart no longer silently drops a file's symbols when the LSP
+  returns a false-empty `documentSymbol` response during warm-up, and no
+  longer silently commits a still-unavailable LSP server's result as if it
+  had succeeded (#6, #7).
+
 ## v0.0.1 (2026-07-05)
 
 ### Added
