@@ -10,6 +10,41 @@ semnav closes that gap: it persists LSP query results into a SQLite-backed graph
 
 See [docs/vision.md](docs/vision.md) for the full rationale and [docs/design/](docs/design/) for the detailed design (graph schema, LSP integration notes, indexing/cache/invalidation, resilience, crate structure).
 
+## Example: grep vs semnav
+
+Task: "I'm about to change `parse_config`'s signature — who calls it?"
+
+**grep** (`rg parse_config`) returns every textual match: the definition itself, unrelated names that happen to contain the same substring (`parse_config_file`), imports, comments, docstrings, and fixture data — with no way to tell which hits are real call sites without opening each file and reading the surrounding code.
+
+**semnav**, once `<root>` is indexed and a `daemon` is warm:
+
+```json
+// 1. resolve the exact symbol (skip this if the fqn is already known)
+{"tool": "find_symbol", "arguments": {"pattern": "parse_config"}}
+
+// 2. list every real call site
+{"tool": "find_callers", "arguments": {"symbol": {"fqn": "app.config.parse_config"}}}
+```
+
+```json
+{
+  "callers": [
+    {
+      "node": {"fqn": "app.cli.main", "uri": "file:///repo/app/cli.py", "kind_label": "Function", "...": "..."},
+      "call_sites": [{"start": {"line": 41, "character": 10}, "end": {"line": 41, "character": 23}}]
+    },
+    {
+      "node": {"fqn": "tests.test_config.test_defaults", "uri": "file:///repo/tests/test_config.py", "...": "..."},
+      "call_sites": [{"start": {"line": 12, "character": 4}, "end": {"line": 12, "character": 17}}]
+    }
+  ],
+  "next_cursor": null,
+  "hint_fqns": []
+}
+```
+
+Every entry is a call site resolved via the LSP's call hierarchy — no comments, no unrelated `parse_config_file`, no manual filtering of grep noise. `read_range` then reads just the lines actually needed for each call site, instead of opening each file whole. See [docs/design/mcp-tools.md](docs/design/mcp-tools.md) for the full tool schemas.
+
 ## How it works
 
 * The graph is a **cache of LSP results**, not a source of truth — when it's stale, it's re-evaluated via LSP on the next query ([docs/design/indexing-and-cache.md](docs/design/indexing-and-cache.md)).
