@@ -13,7 +13,7 @@ Before this change, `semnav serve <root>` was a single process spawned by the MC
 ## Process split
 
 * **`semnav daemon <root>`**: owns the real state — `DbActor`, `QueryEngine`, `QueryRuntime` (LSP supervisors), `FsWatcher`, `SemnavServer`. Lives until idle-timeout, an explicit `daemon stop`, or a signal. Exactly one daemon runs per `<root>` at a time.
-* **`semnav serve <root>`**: the process the MCP client actually spawns over stdio — unchanged from the client's point of view. Holds **no domain state** — no `DbActor`, no `QueryRuntime`, no LSP supervisor. On startup it ensures a daemon is running (auto-spawning one if needed), then proxies all 8 tools to it over `DaemonClient`. `serve` exiting (gracefully or via `kill -9`) has **zero effect** on the daemon or its LSP children — that inversion of the old "MCP process owns everything" model is the entire point.
+* **`semnav serve <root>`**: the process the MCP client actually spawns over stdio — unchanged from the client's point of view. Holds **no domain state** — no `DbActor`, no `QueryRuntime`, no LSP supervisor. On startup it ensures a daemon is running (auto-spawning one if needed), then proxies all 8 tools to it through a [`ReconnectingDaemonClient`](#reconnect) that re-attaches if that daemon later disappears. `serve` exiting (gracefully or via `kill -9`) has **zero effect** on the daemon or its LSP children — that inversion of the old "MCP process owns everything" model is the entire point.
 
 ## File layout
 
@@ -96,6 +96,12 @@ The same retry queue also catches a still-unavailable LSP server (github.com/Yas
 Suspicious-empty and LSP-unavailable uris are both held back from the first pass and retried up to `SUSPICIOUS_RETRY_ATTEMPTS` (5) times, `SUSPICIOUS_RETRY_DELAY` (2s) apart; a uri still unresolved after every retry is left with its existing index entries untouched and logged explicitly (`... skipped as unresolved (suspiciously empty or LSP unavailable)`) so the drop is visible instead of silently folding into the `0 failure(s)` count.
 
 It runs in the background rather than blocking `daemon::server::run`, so a large repo doesn't delay this daemon accepting connections — a query landing mid-reconcile just sees the same pre-existing snapshot it would have seen anyway, not a new failure mode. Each file pays a full LSP round-trip (`ensure_document` + `documentSymbol`) regardless of whether it actually changed — diffing happens *after* the fetch, inside `reconcile_file_symbols` — so this is closer in cost to a full re-index pass than to the live watcher's normal one-file-at-a-time trickle. Acceptable for 0.0.1's per-file-mtime-free design; a future revision could track a per-file mtime/hash in `index_meta` to skip files that provably haven't changed, avoiding the LSP round-trip entirely for the common case where the daemon was down only briefly.
+
+## Reconnect
+
+`serve` is typically far longer-lived than a daemon: an MCP client session can run for days, while a daemon self-terminates after 30 minutes idle by default and can also disappear via an explicit `daemon stop` (e.g. `rebuild-daemon` picking up a freshly built binary — see the repo's own `.claude/skills/rebuild-daemon`) or a crash. `ProxyServer` (`src/mcp/proxy.rs`) doesn't hold a raw `DaemonClient` for this reason; it holds a `ReconnectingDaemonClient` (`src/daemon/reconnect.rs`), which wraps one behind an `Arc<RwLock<..>>` and re-runs `ensure_and_connect` (`src/daemon/connect.rs` — the same auto-spawn-or-attach logic `run_serve` uses for its first connection) whenever a call finds the current connection dead, retrying that one call once against the fresh connection before giving up.
+
+"Dead" is `DaemonClient::is_closed`, not a string match on the error: the client actor's `mpsc::Receiver` drops the instant the actor loop exits — on a read EOF/protocol error *or* a write failure (e.g. `EPIPE` from writing into an already-closed socket, which can be observed before the reader side notices the same close) — so `is_closed()` reflects connection death immediately and unambiguously, without confusing it for a genuine tool/protocol-level error a live daemon returned (retrying those against a fresh connection would just reproduce the same failure).
 
 ## Known risks (accepted, not solved here)
 

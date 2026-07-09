@@ -78,6 +78,17 @@ impl DaemonClient {
             .map_err(|_| anyhow!("daemon client dropped reply"))?
             .map_err(|msg| anyhow!("daemon error: {msg}"))
     }
+
+    /// Whether the connection behind this client has died (EOF, protocol
+    /// error, or the daemon process exiting) — the actor task drops its
+    /// `mpsc::Receiver` the moment it stops running, which flips this
+    /// immediately with no round trip needed. Lets a caller distinguish "this
+    /// client is dead, reconnecting will help" from a genuine tool/protocol
+    /// error `call` returned, where retrying on a fresh connection would just
+    /// reproduce the same failure.
+    pub fn is_closed(&self) -> bool {
+        self.tx.is_closed()
+    }
 }
 
 async fn reader_loop<R>(reader: R, inbound_tx: mpsc::UnboundedSender<Inbound>)
@@ -140,8 +151,18 @@ async fn actor_loop<W>(
                         Ok(()) => {
                             pending.insert(id, reply);
                         }
+                        // A write failure (e.g. EPIPE) means the connection
+                        // is unusable, whether or not the reader side has
+                        // noticed EOF yet — treat it as fatal immediately
+                        // rather than leaving the actor alive to fail every
+                        // future call the same way one at a time. This also
+                        // makes `DaemonClient::is_closed` observable right
+                        // away, which `ReconnectingDaemonClient` depends on.
                         Err(e) => {
-                            let _ = reply.send(Err(format!("write failed: {e}")));
+                            let msg = format!("write failed: {e}");
+                            let _ = reply.send(Err(msg.clone()));
+                            close_reason = Some(msg);
+                            alive = false;
                         }
                     }
                 }

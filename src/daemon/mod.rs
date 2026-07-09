@@ -10,7 +10,9 @@
 //! of the connection.
 
 pub mod client;
+pub mod connect;
 pub mod discovery;
 pub mod lock;
 pub mod protocol;
+pub mod reconnect;
 pub mod server;

@@ -11,8 +11,8 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ErrorData, Json, ServerHandler, tool, tool_handler, tool_router};
 use serde::de::DeserializeOwned;
 
-use crate::daemon::client::DaemonClient;
 use crate::daemon::protocol::DaemonRequest;
+use crate::daemon::reconnect::ReconnectingDaemonClient;
 use crate::query::{FindSymbolResult, ReadRangeResult};
 
 use super::dto::{
@@ -25,12 +25,12 @@ use super::dto::{
 /// forwarding every call through [`DaemonClient`].
 #[derive(Clone)]
 pub struct ProxyServer {
-    daemon: DaemonClient,
+    daemon: ReconnectingDaemonClient,
     tool_router: ToolRouter<Self>,
 }
 
 impl ProxyServer {
-    pub fn new(daemon: DaemonClient) -> Self {
+    pub fn new(daemon: ReconnectingDaemonClient) -> Self {
         Self {
             daemon,
             tool_router: Self::tool_router(),
@@ -151,7 +151,9 @@ impl ProxyServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::client::DaemonClient;
     use crate::daemon::protocol::{DaemonEnvelope, DaemonResponseEnvelope, read_line, write_line};
+    use std::path::PathBuf;
     use tokio::io::{AsyncRead, AsyncWrite, BufReader, duplex};
 
     /// A minimal fake daemon that answers every request by echoing a canned
@@ -190,7 +192,12 @@ mod tests {
         let (client_reader, server_writer) = duplex(4096);
         let (server_reader, client_writer) = duplex(4096);
         tokio::spawn(fake_daemon(server_reader, server_writer));
-        ProxyServer::new(DaemonClient::spawn(client_reader, client_writer))
+        let client = DaemonClient::spawn(client_reader, client_writer);
+        ProxyServer::new(ReconnectingDaemonClient::new(
+            PathBuf::from("/unused-root"),
+            PathBuf::from("/unused-root/.semnav"),
+            client,
+        ))
     }
 
     #[tokio::test]
