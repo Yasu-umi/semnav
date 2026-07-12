@@ -3,6 +3,7 @@
 ## Language Adapter
 
 0.0.1 targets **Python**, **TypeScript (tsserver)**, and **Rust (rust-analyzer)**.
+**Go (gopls)** was added afterward.
 
 > For the actual response structures per LSP method and the language differences (pyright vs tsserver), see [lsp-integration.md](./lsp-integration.md).
 
@@ -19,7 +20,7 @@ trait LanguageAdapter {
 
 ## NodeKind
 
-The LSP-standard `SymbolKind` is a protocol-common enum, and tsserver and pyright return the same values for it, so **no normalization is needed**. `NodeKind` holds the standard values as an enum, and falls back to a string for values outside the LSP spec so no information is lost.
+The LSP-standard `SymbolKind` is a protocol-common enum, and tsserver, pyright, and gopls all return the same values for it, so **no normalization is needed**. `NodeKind` holds the standard values as an enum, and falls back to a string for values outside the LSP spec so no information is lost.
 
 ```rust
 enum NodeKind {
@@ -36,6 +37,8 @@ There are cases that can't be classified by standard `SymbolKind` alone. A repre
 
 For this reason, in addition to the first-pass approximation (pass-through) obtained from `documentSymbol`, `NodeKind` **extracts an auxiliary classification (`construct`: `type` / `interface` / `class` / `function` / `const`, etc.) from the leading keyword of the `hover` signature, and is promoted to `Custom` if a more accurate classification can be determined**. Even for `SymbolKind=13`, if `construct=type` is determined, it becomes `Custom("TypeAlias")`.
 
+Go needs no such refinement: gopls's `documentSymbol` reports struct/interface/func/method/field with unambiguous standard `SymbolKind` values, with no TS-`type`-alias-style collision to disambiguate via hover.
+
 ## LSP Server Provisioning
 
 LSP server binaries are not bundled with the Rust binary; they are procured via **automatic detection and automatic installation**.
@@ -45,13 +48,14 @@ LSP server binaries are not bundled with the Rust binary; they are procured via 
    * TypeScript: `typescript-language-server` (via npm)
    * Python: `pyright` (via npm) or basedpyright
    * Rust: not auto-installed — `rust-analyzer` isn't npm-distributed. `LanguageAdapter::server_package` returns `None` for it, which short-circuits step 2 into a clear error pointing at `rustup component add rust-analyzer` rather than attempting an npm install.
+   * Go: not auto-installed either — `gopls` isn't npm-distributed. `server_package` also returns `None`, pointing users at `go install golang.org/x/tools/gopls@latest`.
 3. If the runtime requirements (Node.js / Python) are not met, guide the user through the installation steps with a clear error message
 
 The binary is kept lightweight, and language runtimes ride on whatever is present in the environment.
 
 ### Environment Overrides
 
-Two environment variables, keyed by `language_name()` upper-cased (`PYTHON`/`TYPESCRIPT`/`RUST`), let the process launching `semnav serve`/`index` (an MCP client's `.mcp.json` `env` block, typically) override provisioning without any semnav-specific configuration protocol — plain launch-time environment variables are the entire "config surface" a stdio MCP server has:
+Two environment variables, keyed by `language_name()` upper-cased (`PYTHON`/`TYPESCRIPT`/`RUST`/`GO`), let the process launching `semnav serve`/`index` (an MCP client's `.mcp.json` `env` block, typically) override provisioning without any semnav-specific configuration protocol — plain launch-time environment variables are the entire "config surface" a stdio MCP server has:
 
 * `SEMNAV_LSP_<LANG>_COMMAND` — replaces the resolved program outright (skips `PATH`/isolated-install resolution). Points at a custom build, a wrapper script, or a server binary at a nonstandard location.
 * `SEMNAV_LSP_<LANG>_ARGS` — extra args appended after the adapter's built-in `CommandSpec::args` (space-separated; no shell-quoting support). Useful for server-specific startup flags semnav doesn't hardcode (e.g. `SEMNAV_LSP_RUST_ARGS="--log-file /tmp/ra.log"`).
