@@ -10,7 +10,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use rmcp::ServiceExt;
-use semnav::adapters::adapter_for_language;
+use semnav::adapters::{adapter_for_language, builtin_adapters};
 use semnav::daemon;
 use semnav::graph::DbActor;
 use semnav::indexer::{
@@ -62,12 +62,13 @@ fn print_help() {
     eprintln!("semnav 0.0.1 — LSP-backed Semantic Graph MCP server");
     eprintln!();
     eprintln!("usage:");
-    eprintln!("  semnav discover <root>   list source files (Python/TS/Rust) under <root>");
+    eprintln!("  semnav discover <root>   list source files (Python/TS/Rust/Go) under <root>");
     eprintln!("  semnav index <root>      index <root> into <root>/.semnav/graph.db");
     eprintln!("                           (provisions pyright/tsserver via npm, needs node + npm;");
     eprintln!(
-        "                            rust-analyzer must already be on PATH, e.g. via rustup)"
+        "                            rust-analyzer and gopls must already be on PATH, e.g. via"
     );
+    eprintln!("                            rustup / `go install golang.org/x/tools/gopls@latest`)");
     eprintln!("  semnav serve <root>      serve the 8 MCP tools over stdio, proxied to a");
     eprintln!("                           background daemon (auto-started; run `index` first)");
     eprintln!(
@@ -88,7 +89,7 @@ fn print_help() {
         "  SEMNAV_QUERY_TIMEOUT_SECS              query-time LSP round-trip timeout (default 150)"
     );
     eprintln!(
-        "  SEMNAV_LSP_<LANG>_COMMAND  override the LSP server binary for <LANG> (e.g. RUST, PYTHON, TYPESCRIPT)"
+        "  SEMNAV_LSP_<LANG>_COMMAND  override the LSP server binary for <LANG> (e.g. RUST, PYTHON, TYPESCRIPT, GO)"
     );
     eprintln!(
         "  SEMNAV_LSP_<LANG>_ARGS     extra args appended to that language's LSP server startup command"
@@ -526,9 +527,12 @@ async fn run_index(root: &Path) -> ExitCode {
     };
 
     let root_uri = root_uri_for(root);
-    let languages = ["python", "typescript", "rust"];
+    let languages: Vec<&'static str> = builtin_adapters()
+        .into_iter()
+        .map(|a| a.language_name())
+        .collect();
     let mut failures = 0u32;
-    for language in languages {
+    for language in languages.iter().copied() {
         match index_language(&db, language, &root_uri, &servers_dir).await {
             Ok(stats) => {
                 eprintln!("[{language}] {stats:?}");
