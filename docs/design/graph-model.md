@@ -94,7 +94,7 @@ Key columns:
 | `calls` | `callHierarchy/outgoingCalls` | caller → callee |
 | `references` | `references` | referrer → referenced |
 | `type_of` | `typeDefinition` | variable/field → type |
-| `implements` | `implementation` | interface → implementation (**TS only**, Python not supported) |
+| `implements` | `implementation` | interface → implementation (**TS and Go only**, Python not supported) |
 | `defines` | `definition` | usage site → declaration |
 | `inherits` | (planned) | class inheritance |
 | `imports` | (planned) | import relationship |

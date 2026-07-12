@@ -53,7 +53,7 @@ Whenever that lookup finds no anchor at all, the response's `hint_fqns` (`find_c
 
 ```
 Filter = {
-  language?:         "python" | "typescript" | "rust",
+  language?:         string,            // free-form: "python" | "typescript" | "rust" | "go" | a custom SEMNAV_CUSTOM_LANGUAGES tag
   kind?:             string[],          // inclusion array of kind_label. e.g. ["Function","Method"]
   include_external?: bool = false,      // false=exclude external nodes (default)
 }
@@ -78,7 +78,7 @@ Node = {
   fqn:              string,
   uri:              string,
   name:             string,
-  language:         "python" | "typescript" | "rust",
+  language:         string,          // "python" | "typescript" | "rust" | "go" | a custom SEMNAV_CUSTOM_LANGUAGES tag
   kind_label:       string,          // "Function" / "Class" / "TypeAlias" etc. (normalized below)
   kind_num:         uint,            // raw LSP SymbolKind value
   construct?:       string,          // auxiliary classification from hover ("type"/"interface"/...) [language-adapters.md]
@@ -138,7 +138,7 @@ output = {
 * Origin: `textDocument/references` (`references` edge). Cross-file workspace scan
 * `context.includeDeclaration` is **true** (the declaration itself is included among references)
 * **Can grow large** (for popular symbols) → paginated via Page
-* **Cache-first + background refresh**: a previously-seen anchor is served from the cache immediately, with a fresh materialization running in the background (`refreshing: true`); a first-ever query for an anchor blocks on one materialization instead, so it's never a false empty ([lsp-integration.md](./lsp-integration.md), [resilience.md](./resilience.md))
+* **Cache-first + background refresh**: a previously-seen anchor is served from the cache immediately, with a fresh materialization running in the background (`refreshing: true`); a first-ever query for an anchor blocks on one materialization instead, so it's never a false empty — and also spawns a background refresh itself (`refreshing: true`), since that inline materialization can be silently incomplete if the LSP server's own background analysis hasn't finished yet ([lsp-integration.md](./lsp-integration.md), [resilience.md](./resilience.md))
 
 ### find_callers — call sites of the caller
 
@@ -155,7 +155,7 @@ output = {
 * Origin: `callHierarchy/incomingCalls` (`calls` edge). `fromRanges` becomes `call_sites`
 * **The `calls` edge cannot be built from documentSymbol alone** → built on first use on demand by querying callHierarchy ([lsp-integration.md](./lsp-integration.md))
 * The caller of a module-scope call (`main()`) becomes a `(module)` node (`kind=2`)
-* **Cache-first + background refresh**: same contract as `find_references` above — a warm anchor is served from the cache with `refreshing: true` while a fresh materialization runs in the background; a cold anchor blocks once ([lsp-integration.md](./lsp-integration.md), [resilience.md](./resilience.md))
+* **Cache-first + background refresh**: same contract as `find_references` above — a warm anchor is served from the cache with `refreshing: true` while a fresh materialization runs in the background; a cold anchor blocks on one materialization and then also spawns a background refresh, always returning `refreshing: true` ([lsp-integration.md](./lsp-integration.md), [resilience.md](./resilience.md))
 * **`with_signature`**: best-effort hover backfill of `signature` on each returned `node` — see "Populating `signature`" below
 
 ### find_callees — call targets
@@ -170,7 +170,7 @@ output = {
 ```
 
 * Origin: `callHierarchy/outgoingCalls` (`calls` edge)
-* tsserver: `to` sometimes points to the **type-resolved target (an interface method)** rather than the concrete implementation actually invoked through it. `src/query/resolver.rs`'s `resolve_outgoing_callee` corrects this: when the resolved callee's container is a TS `Interface` node, it calls `textDocument/implementation` on that method and redirects the `calls` edge to the concrete class's method (persisting an `implements` edge, `interface method → concrete method`, alongside it). Gated on the anchor's language being `"typescript"` — pyright answers `-32601 Unhandled method` for `implementation` ([lsp-integration.md](./lsp-integration.md)), so Python never reaches this path. An empty/failed `implementation` call falls back to the uncorrected interface-method edge, never worse than not having this correction at all. `implements` has no MCP-visible surface of its own — it's internal plumbing that only `find_callees`/`find_call_path` benefit from
+* tsserver/gopls: `to` sometimes points to the **type-resolved target (an interface method)** rather than the concrete implementation actually invoked through it. `src/query/resolver.rs`'s `resolve_outgoing_callee` corrects this: when the resolved callee's container is an `Interface` node, it calls `textDocument/implementation` on that method and redirects the `calls` edge to the concrete class's method (persisting an `implements` edge, `interface method → concrete method`, alongside it). Gated on the anchor's language being `"typescript"` or `"go"` — pyright answers `-32601 Unhandled method` for `implementation` ([lsp-integration.md](./lsp-integration.md)), so Python never reaches this path. An empty/failed `implementation` call falls back to the uncorrected interface-method edge, never worse than not having this correction at all. `implements` has no MCP-visible surface of its own — it's internal plumbing that only `find_callees`/`find_call_path` benefit from
 * **Precise content-hash cache, not cache-first + background refresh**: unlike `find_callers`/`find_references`, the callee list is fully determined by the anchor's own file, so a byte-identical anchor file since the last materialization serves an exact cached answer with no LSP call and no `refreshing` field at all ([lsp-integration.md](./lsp-integration.md))
 * **`with_signature`**: best-effort hover backfill of `signature` on each returned `node` — see "Populating `signature`" below
 
