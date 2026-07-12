@@ -825,6 +825,43 @@ mod tests {
         assert_eq!(locs[0].range.start.line, 5);
     }
 
+    /// Real gopls `textDocument/definition` response (live-probed this
+    /// session, `tests/fixtures/lsp-probe/README.md` manual-capture
+    /// methodology; `docs/design/lsp-integration.md`): gopls answers with a
+    /// plain `Location`, same shape as pyright, even though it also
+    /// advertises `implementationProvider`/`typeDefinitionProvider` and the
+    /// client declares `linkSupport: true`.
+    #[test]
+    fn parse_locations_matches_captured_gopls_definition() {
+        let raw: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/lsp-probe/captures/go_definition_basic.json"
+        ))
+        .unwrap();
+        let locs = parse_locations(raw).unwrap();
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0].uri, "file:///repo/mod.go");
+        assert_eq!(locs[0].range.start.character, 5);
+        assert_eq!(locs[0].range.end.character, 13);
+    }
+
+    /// Real gopls `textDocument/implementation` on a Go interface
+    /// (`Greeter`) resolving to the concrete struct (`Person`) that
+    /// satisfies it structurally — Go's implicit interface satisfaction
+    /// means there's no explicit `implements` keyword for gopls to key off,
+    /// yet `implementation` still resolves it, unlike pyright's
+    /// `-32601 Unhandled method` for the same request.
+    #[test]
+    fn parse_locations_matches_captured_gopls_implementation() {
+        let raw: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/lsp-probe/captures/go_implementation_interface_to_struct.json"
+        ))
+        .unwrap();
+        let locs = parse_locations(raw).unwrap();
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0].uri, "file:///repo/mod.go");
+        assert_eq!(locs[0].range.start.line, 10);
+    }
+
     #[test]
     fn parse_hover_flattens_markup_and_string_contents() {
         let markup = serde_json::json!({"contents": {"kind": "markdown", "value": "doc body"}});

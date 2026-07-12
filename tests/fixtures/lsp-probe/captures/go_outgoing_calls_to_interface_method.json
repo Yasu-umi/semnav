@@ -1,0 +1,42 @@
+[
+  {
+    "fromRanges": [
+      {
+        "end": {
+          "character": 15,
+          "line": 23
+        },
+        "start": {
+          "character": 10,
+          "line": 23
+        }
+      }
+    ],
+    "to": {
+      "detail": "goprobe/pkg • greeter.go",
+      "kind": 12,
+      "name": "Greet",
+      "range": {
+        "end": {
+          "character": 6,
+          "line": 6
+        },
+        "start": {
+          "character": 1,
+          "line": 6
+        }
+      },
+      "selectionRange": {
+        "end": {
+          "character": 6,
+          "line": 6
+        },
+        "start": {
+          "character": 1,
+          "line": 6
+        }
+      },
+      "uri": "file:///repo/mod.go"
+    }
+  }
+]

@@ -714,10 +714,16 @@ mod tests {
     /// (with a `Greet` method) and a `Person` struct implementing it (with
     /// its own `Greet`), plus a `SayHello` function whose `outgoingCalls`
     /// mock response points `to` the interface's method — the exact shape
-    /// observed live probing gopls (`docs/design/lsp-integration.md`
-    /// callHierarchy note). The concrete container is `"Struct"` rather than
-    /// `"Class"`, since the correction only checks the *callee's* container
-    /// is `"Interface"`, not the shape of the implementer.
+    /// observed live probing gopls
+    /// (`tests/fixtures/lsp-probe/captures/go_outgoing_calls_to_interface_method.json`,
+    /// `docs/design/lsp-integration.md` callHierarchy note). The concrete
+    /// container is `"Struct"` rather than `"Class"`, since the correction
+    /// only checks the *callee's* container is `"Interface"`, not the shape
+    /// of the implementer. Note gopls's call-hierarchy items report
+    /// `kind=12` (Function) uniformly, even for this method — unlike
+    /// tsserver's `kind=6` (Method) — but the mock's `kind` field here is
+    /// unused by the correction, which resolves the callee via
+    /// `find_node_by_position` against the already-indexed node instead.
     /// Returns `(engine, mock, anchor, anchor_id, interface_method_id, concrete_method_id)`.
     async fn interface_dispatch_scenario_go()
     -> (QueryEngine, MockLspQueryClient, Node, i64, i64, i64) {

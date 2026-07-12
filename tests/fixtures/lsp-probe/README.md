@@ -32,6 +32,7 @@ source that a live test can just as easily write inline.
 
 pyright `1.1.409` / typescript-language-server `5.1.3` + typescript `6.0.3`
 (same environment as `docs/design/lsp-integration.md`'s original probes).
+gopls `v0.22.0` (go `1.26.4`) for the `go_*.json` captures.
 
 ## Refreshing a capture
 

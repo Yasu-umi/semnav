@@ -1,0 +1,15 @@
+[
+  {
+    "range": {
+      "end": {
+        "character": 11,
+        "line": 10
+      },
+      "start": {
+        "character": 5,
+        "line": 10
+      }
+    },
+    "uri": "file:///repo/mod.go"
+  }
+]

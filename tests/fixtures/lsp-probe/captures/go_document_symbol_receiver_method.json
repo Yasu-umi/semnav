@@ -1,0 +1,81 @@
+[
+  {
+    "children": [
+      {
+        "children": [],
+        "detail": "string",
+        "kind": 8,
+        "name": "Name",
+        "range": {
+          "end": {
+            "character": 12,
+            "line": 11
+          },
+          "start": {
+            "character": 1,
+            "line": 11
+          }
+        },
+        "selectionRange": {
+          "end": {
+            "character": 5,
+            "line": 11
+          },
+          "start": {
+            "character": 1,
+            "line": 11
+          }
+        }
+      }
+    ],
+    "detail": "struct{...}",
+    "kind": 23,
+    "name": "Person",
+    "range": {
+      "end": {
+        "character": 1,
+        "line": 12
+      },
+      "start": {
+        "character": 5,
+        "line": 10
+      }
+    },
+    "selectionRange": {
+      "end": {
+        "character": 11,
+        "line": 10
+      },
+      "start": {
+        "character": 5,
+        "line": 10
+      }
+    }
+  },
+  {
+    "children": [],
+    "detail": "func() string",
+    "kind": 6,
+    "name": "(*Person).Greet",
+    "range": {
+      "end": {
+        "character": 1,
+        "line": 16
+      },
+      "start": {
+        "character": 0,
+        "line": 14
+      }
+    },
+    "selectionRange": {
+      "end": {
+        "character": 22,
+        "line": 14
+      },
+      "start": {
+        "character": 17,
+        "line": 14
+      }
+    }
+  }
+]

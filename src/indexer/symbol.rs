@@ -384,4 +384,34 @@ mod tests {
              the ON CONFLICT(fqn) upsert at write time is what collapses them"
         );
     }
+
+    /// Real gopls `textDocument/documentSymbol` on a `Person` struct with a
+    /// `Greet` method declared on a `*Person` receiver
+    /// (`tests/fixtures/lsp-probe/`, `docs/design/lsp-integration.md`
+    /// documentSymbol note): unlike Python/TS, the method does **not** nest
+    /// under its receiver struct — gopls reports it as a top-level sibling
+    /// named `"(*Person).Greet"`. `flatten_document_symbols` must accept
+    /// this without erroring or trying to associate it with `Person`; it
+    /// just becomes its own top-level entry (`parent: None`), same as any
+    /// other free function.
+    #[test]
+    fn flatten_keeps_gopls_receiver_method_as_a_top_level_sibling() {
+        let raw = include_str!(
+            "../../tests/fixtures/lsp-probe/captures/go_document_symbol_receiver_method.json"
+        );
+        let symbols: Vec<DocumentSymbol> = serde_json::from_str(raw).expect("parse capture");
+        let flat = flatten_document_symbols(&symbols, "app.mod");
+
+        assert_eq!(flat.len(), 3, "Person + its Name field + the sibling method");
+        assert_eq!(flat[0].fqn, "app.mod.Person");
+        assert_eq!(flat[0].parent, None);
+        assert_eq!(flat[1].fqn, "app.mod.Person.Name");
+        assert_eq!(flat[1].parent, Some(0));
+        assert_eq!(flat[2].fqn, "app.mod.(*Person).Greet");
+        assert_eq!(flat[2].kind, 6);
+        assert_eq!(
+            flat[2].parent, None,
+            "the receiver method is a top-level sibling, not a child of Person"
+        );
+    }
 }
