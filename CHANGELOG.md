@@ -5,6 +5,15 @@ as the GitHub release notes (auto-generated notes are the fallback).
 
 ## Unreleased
 
+### Fixed
+
+- Cold-path `find_references`/`find_callers` now spawn a background refresh
+  after the initial inline materialization, so silently incomplete results
+  from a still-analyzing LSP server (observed with pyright on large repos)
+  converge instead of becoming the permanent cached answer. The response
+  carries `refreshing: true` so clients know the result may still be
+  growing.
+
 ### Added
 
 - **Custom/generic language adapter**: `SEMNAV_CUSTOM_LANGUAGES` registers an

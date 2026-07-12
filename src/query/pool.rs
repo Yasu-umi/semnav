@@ -257,7 +257,10 @@ impl QueryRuntime {
     /// (`docs/design/lsp-integration.md`): a *warm* anchor (materialized at
     /// least once before) is served from the cache immediately while a fresh
     /// materialization runs in the background; a *cold* anchor blocks on one
-    /// materialization first, so a first-ever query is never a false empty.
+    /// materialization first, so a first-ever query is never a false empty,
+    /// then also spawns a background refresh — the inline materialization may
+    /// be silently incomplete when the LSP server's background analysis hasn't
+    /// finished yet (observed with pyright on large repos).
     /// The returned `bool` is `true` when a background refresh was kicked off
     /// (the caller should re-query for the fresh answer).
     pub async fn find_references(
@@ -315,10 +318,17 @@ impl QueryRuntime {
                 .engine
                 .references_from_cache(anchor_id, filter, page)
                 .await?;
+            self.spawn_refresh(
+                anchor_id,
+                "references",
+                RefreshKind::References,
+                anchor_node,
+                client,
+            );
             return Ok((
                 result,
                 degradation.or(timeout_degradation(timed_out || materialize_timed_out)),
-                false,
+                true,
             ));
         }
 
@@ -340,8 +350,9 @@ impl QueryRuntime {
         ))
     }
 
-    /// `find_callers` — cache-first + background refresh; see
-    /// [`Self::find_references`] for the warm/cold/refresh contract.
+    /// `find_callers` — cache-first + background refresh (both warm and cold
+    /// paths spawn a background refresh); see [`Self::find_references`] for
+    /// the warm/cold/refresh contract.
     /// `with_signature` backfills each returned node's `signature` via the
     /// same client, best effort (`docs/design/mcp-tools.md`).
     pub async fn find_callers(
@@ -403,10 +414,17 @@ impl QueryRuntime {
                 )
                 .await;
             }
+            self.spawn_refresh(
+                anchor_id,
+                "calls",
+                RefreshKind::Calls(Direction::Incoming),
+                anchor_node,
+                client,
+            );
             return Ok((
                 result,
                 degradation.or(timeout_degradation(timed_out || materialize_timed_out)),
-                false,
+                true,
             ));
         }
 
@@ -1961,7 +1979,8 @@ mod tests {
         let runtime = QueryRuntime::open(engine, servers_dir);
         let anchor = SymbolRef::Fqn("app.mod.helper".to_string());
 
-        // Cold: blocks, returns the one caller that exists at index time.
+        // Cold: blocks on inline materialize, returns the one caller that
+        // exists at index time, then spawns a background refresh.
         let (first, degradation, refreshing) = runtime
             .find_callers(&anchor, &Filter::default(), &Page::default(), false)
             .await
@@ -1970,8 +1989,8 @@ mod tests {
         assert_eq!(first.items[0].node.fqn, "app.mod.caller_one");
         assert!(degradation.is_none());
         assert!(
-            !refreshing,
-            "cold path materializes inline, no background refresh"
+            refreshing,
+            "cold path materializes inline, then spawns a background refresh"
         );
 
         // Add a second caller, without re-indexing (mirrors a live edit the

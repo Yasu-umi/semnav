@@ -103,3 +103,15 @@ The escalation itself:
 > (`src/indexer/fetch.rs`). This didOpen is for the *initial index* of source
 > files only; the A2 point that typeshed / node_modules / site-packages need no
 > prior didOpen still stands.
+
+> **Revision (2026-07, cold-path refresh):** the "filled in progressively"
+> contract above relied on the warm-path `spawn_refresh` to converge stale
+> cross-file results. A cold anchor (first-ever query) blocked on one inline
+> materialization but did not schedule any follow-up, so silently incomplete
+> results from a still-analyzing server became the permanent cached answer
+> unless re-queried. Empirically, pyright on a ~17k-file repo returned 1
+> reference (instead of 2485) when `references()` was called before
+> background analysis completed. The cold path now also spawns a background
+> refresh after the inline materialization and returns `refreshing: true`,
+> extending the progressive-enrichment philosophy to first-time queries
+> (`src/query/pool.rs`).
