@@ -1,15 +1,17 @@
-//! Language adapters — `LanguageAdapter` trait, pyright/tsserver implementations,
-//! provisioning (isolated npm install), `map_symbol_kind` / `NodeKind`, and
-//! hover-based refine (`construct` extraction).
+//! Language adapters — `LanguageAdapter` trait, pyright/tsserver/rust-analyzer/gopls
+//! implementations, provisioning (isolated npm install), `map_symbol_kind` /
+//! `NodeKind`, and hover-based refine (`construct` extraction).
 //!
 //! See `docs/design/language-adapters.md`.
 
+mod go;
 mod kind;
 mod provision;
 mod python;
 mod rust;
 mod typescript;
 
+pub use go::GoAdapter;
 pub use kind::{NodeKind, SymbolKind};
 pub use provision::{ProvisionContext, provision};
 pub use python::PythonAdapter;
@@ -108,11 +110,11 @@ pub trait LanguageAdapter: Send + Sync {
     }
 }
 
-/// The built-in adapters shipped with 0.0.1 (Python, TypeScript, Rust).
-/// References are `'static` (unit-struct ZST promotion), so the registry is
-/// cheap to build.
+/// The built-in adapters: Python, TypeScript, and Rust shipped with 0.0.1;
+/// Go added afterward. References are `'static` (unit-struct ZST promotion),
+/// so the registry is cheap to build.
 pub fn builtin_adapters() -> Vec<&'static dyn LanguageAdapter> {
-    vec![&PythonAdapter, &TypeScriptAdapter, &RustAdapter]
+    vec![&PythonAdapter, &TypeScriptAdapter, &RustAdapter, &GoAdapter]
 }
 
 /// Pick the built-in adapter that owns `uri`, if any.
@@ -154,12 +156,13 @@ mod tests {
     }
 
     #[test]
-    fn builtin_adapters_cover_python_typescript_and_rust() {
+    fn builtin_adapters_cover_python_typescript_rust_and_go() {
         let adapters = builtin_adapters();
-        assert_eq!(adapters.len(), 3);
+        assert_eq!(adapters.len(), 4);
         assert_eq!(adapters[0].language_name(), "python");
         assert_eq!(adapters[1].language_name(), "typescript");
         assert_eq!(adapters[2].language_name(), "rust");
+        assert_eq!(adapters[3].language_name(), "go");
     }
 
     #[test]
@@ -175,6 +178,10 @@ mod tests {
         assert_eq!(
             select_for_uri("file:///app/main.rs").map(|a| a.language_name()),
             Some("rust")
+        );
+        assert_eq!(
+            select_for_uri("file:///app/main.go").map(|a| a.language_name()),
+            Some("go")
         );
         assert!(select_for_uri("file:///app/Cargo.toml").is_none());
     }
@@ -202,6 +209,13 @@ mod tests {
                 args: &[],
             }
         );
+        assert_eq!(
+            GoAdapter.server_command(),
+            CommandSpec {
+                program: "gopls",
+                args: &[],
+            }
+        );
     }
 
     #[test]
@@ -225,6 +239,8 @@ mod tests {
         );
         // rust-analyzer isn't npm-distributed; must already be on PATH.
         assert_eq!(RustAdapter.server_package(), None);
+        // gopls isn't npm-distributed either; must already be on PATH.
+        assert_eq!(GoAdapter.server_package(), None);
     }
 
     #[test]
@@ -241,6 +257,10 @@ mod tests {
             adapter_for_language("rust").map(|a| a.language_name()),
             Some("rust")
         );
-        assert!(adapter_for_language("go").is_none());
+        assert_eq!(
+            adapter_for_language("go").map(|a| a.language_name()),
+            Some("go")
+        );
+        assert!(adapter_for_language("java").is_none());
     }
 }
