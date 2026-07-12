@@ -402,7 +402,11 @@ mod tests {
         let symbols: Vec<DocumentSymbol> = serde_json::from_str(raw).expect("parse capture");
         let flat = flatten_document_symbols(&symbols, "app.mod");
 
-        assert_eq!(flat.len(), 3, "Person + its Name field + the sibling method");
+        assert_eq!(
+            flat.len(),
+            3,
+            "Person + its Name field + the sibling method"
+        );
         assert_eq!(flat[0].fqn, "app.mod.Person");
         assert_eq!(flat[0].parent, None);
         assert_eq!(flat[1].fqn, "app.mod.Person.Name");
