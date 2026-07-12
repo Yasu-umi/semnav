@@ -95,6 +95,21 @@ fn print_help() {
         "  SEMNAV_LSP_<LANG>_ARGS     extra args appended to that language's LSP server startup command"
     );
     eprintln!(
+        "  SEMNAV_CUSTOM_LANGUAGES    comma-separated tags for languages with no built-in adapter"
+    );
+    eprintln!(
+        "                             (e.g. java,cpp); each tag needs SEMNAV_LSP_<TAG>_EXTENSIONS"
+    );
+    eprintln!(
+        "                             and SEMNAV_LSP_<TAG>_COMMAND (same override vars as above)"
+    );
+    eprintln!(
+        "  SEMNAV_LSP_<TAG>_EXTENSIONS       comma-separated file extensions for a custom language"
+    );
+    eprintln!(
+        "  SEMNAV_LSP_<TAG>_EXTERNAL_MARKERS optional comma-separated dependency-path fragments"
+    );
+    eprintln!(
         "  SEMNAV_LOG                 tracing filter (RUST_LOG syntax, e.g. `semnav=debug`);\n                             default is silent (docs/design/observability.md)"
     );
 }
