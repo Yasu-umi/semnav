@@ -1298,6 +1298,63 @@ mod tests {
         runtime.shutdown_all().await;
     }
 
+    /// Real gopls, end-to-end: `find_callees` on a function that calls a
+    /// method through an interface-typed parameter must return the
+    /// *concrete* implementing struct's method, not the interface's own
+    /// declaration — same fix as `find_callees_corrects_interface_dispatch_to_the_implementing_class`
+    /// above, but for Go's implicit interface satisfaction
+    /// (`src/query/resolver.rs` `resolve_outgoing_callee`'s gate widened to
+    /// admit `"go"`). Ignored by default — it needs `gopls` on `PATH`.
+    #[ignore = "requires gopls on PATH (go install golang.org/x/tools/gopls@latest)"]
+    #[tokio::test]
+    async fn find_callees_corrects_interface_dispatch_to_the_implementing_class_for_go() {
+        let dir = tempdir().expect("tempdir");
+        let app = dir.path().join("app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join("go.mod"), "module app\n\ngo 1.22\n").unwrap();
+        fs::write(
+            app.join("mod.go"),
+            "package app\n\ntype Greeter interface {\n\tGreet() string\n}\n\ntype EnglishGreeter struct{}\n\nfunc (e *EnglishGreeter) Greet() string {\n\treturn \"hello\"\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            app.join("caller.go"),
+            "package app\n\nfunc UseGreeter(g Greeter) string {\n\treturn g.Greet()\n}\n",
+        )
+        .unwrap();
+
+        let root_uri = root_uri_for(dir.path());
+        let cache_dir = dir.path().join(".semnav");
+        let servers_dir = cache_dir.join("servers");
+        let db_path = cache_dir.join("graph.db");
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let db = DbActor::spawn(&db_path).expect("spawn db");
+        index_language(&db, "go", &root_uri, &servers_dir)
+            .await
+            .expect("index go");
+
+        let engine = QueryEngine::new(db, root_uri.clone());
+        let runtime = QueryRuntime::open(engine, servers_dir);
+
+        let (res, degradation) = runtime
+            .find_callees(
+                &SymbolRef::Fqn("app.caller.UseGreeter".to_string()),
+                &Filter::default(),
+                &Page::default(),
+                false,
+            )
+            .await
+            .expect("find_callees through real gopls");
+        assert!(degradation.is_none());
+        assert_eq!(res.items.len(), 1);
+        assert_eq!(
+            res.items[0].node.name, "(*EnglishGreeter).Greet",
+            "must resolve to the concrete implementation, not the Greeter interface's Greet"
+        );
+
+        runtime.shutdown_all().await;
+    }
+
     /// Real pyright, end-to-end: `workspace/symbol` returns an empty array in
     /// this environment (`docs/design/lsp-integration.md`: "not to be
     /// trusted" — semnav works around it by aggregating each file's

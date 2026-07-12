@@ -201,4 +201,66 @@ mod tests {
         assert_eq!(child.name, "load");
         assert_eq!(child.container_id, parent.id, "load is contained by Repo");
     }
+
+    /// Real gopls, end-to-end. Indexes a `Repo` interface with a `Load`
+    /// method and asserts the symbols land in the graph with the right FQN
+    /// and container linkage. Uses an interface (not a struct+receiver
+    /// method) because gopls's `documentSymbol` nests an interface's methods
+    /// under it, but does **not** nest a struct's receiver methods under the
+    /// struct (`docs/design/lsp-integration.md` documentSymbol note,
+    /// `src/indexer/symbol.rs`'s `flatten_keeps_gopls_receiver_method_as_a_top_level_sibling`)
+    /// — this test exercises the shape that mirrors pyright/tsserver's
+    /// class+method containment most directly. Ignored by default — it
+    /// needs `gopls` on `PATH` (`go install golang.org/x/tools/gopls@latest`).
+    #[ignore = "requires gopls on PATH (go install golang.org/x/tools/gopls@latest)"]
+    #[tokio::test]
+    async fn index_language_real_gopls() {
+        let dir = tempdir().expect("tempdir");
+        let app = dir.path().join("app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join("go.mod"), "module app\n\ngo 1.22\n").unwrap();
+        fs::write(
+            app.join("repo.go"),
+            "package app\n\ntype Repo interface {\n\tLoad()\n}\n",
+        )
+        .unwrap();
+
+        let root_uri = root_uri_for(dir.path());
+        let cache_dir = dir.path().join(".semnav");
+        let servers_dir = cache_dir.join("servers");
+        let db_path = cache_dir.join("graph.db");
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let db = DbActor::spawn(&db_path).expect("spawn db");
+
+        let stats = index_language(&db, "go", &root_uri, &servers_dir)
+            .await
+            .expect("index go");
+        assert!(
+            stats.files_indexed >= 1,
+            "expected at least one file indexed, got {stats:?}"
+        );
+
+        let status = db
+            .get_meta("go.lsp_status")
+            .await
+            .expect("get_meta")
+            .expect("go.lsp_status recorded");
+        assert_eq!(status, "healthy");
+
+        let parent = db
+            .get_node_by_fqn("app.repo.Repo")
+            .await
+            .unwrap()
+            .expect("Repo node");
+        let child = db
+            .get_node_by_fqn("app.repo.Repo.Load")
+            .await
+            .unwrap()
+            .expect("Load node");
+        assert_eq!(parent.node_kind, "Interface");
+        assert_eq!(parent.language, "go");
+        assert_eq!(child.kind, 6, "gopls reports an interface method as Method");
+        assert_eq!(child.name, "Load");
+        assert_eq!(child.container_id, parent.id, "Load is contained by Repo");
+    }
 }
