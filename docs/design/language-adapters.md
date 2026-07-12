@@ -62,6 +62,42 @@ Two environment variables, keyed by `language_name()` upper-cased (`PYTHON`/`TYP
 
 The three LSP timeouts (`docs/design/lsp-lifecycle.md`) are similarly overridable process-wide (not per-language): `SEMNAV_INITIALIZE_TIMEOUT_SECS`, `SEMNAV_DOCUMENT_SYMBOL_TIMEOUT_SECS`, `SEMNAV_QUERY_TIMEOUT_SECS`.
 
+## Custom/Generic Adapter
+
+`SEMNAV_CUSTOM_LANGUAGES` lets a user point semnav at an LSP server for a
+language with no built-in adapter (Java, C/C++, Ruby, PHP, ...) — a "just
+make it run" escape hatch, not a plugin system. No new Rust code, no release
+needed; parsed once per process by `src/adapters/custom.rs::custom_adapters`
+and appended to `builtin_adapters()`.
+
+* `SEMNAV_CUSTOM_LANGUAGES` — comma-separated tags to register, e.g.
+  `SEMNAV_CUSTOM_LANGUAGES=java,cpp`.
+* Per tag `T` (upper-cased, e.g. `JAVA`):
+  * `SEMNAV_LSP_T_EXTENSIONS` — comma-separated file extensions with the
+    leading dot (e.g. `.java`). **Required**: a tag with no (or empty)
+    extensions is dropped during parsing (logged to stderr, not a hard
+    error) — an adapter matching zero files would only produce a spurious
+    failed `index_language` attempt, since every language in
+    `builtin_adapters()` is attempted unconditionally regardless of match
+    count.
+  * `SEMNAV_LSP_T_COMMAND` — **required** in practice: a custom language has
+    no built-in default program, so this is the same
+    `command_override_from_env` var described above, and an unset one falls
+    into the `server_package() == None` bail path (below) naming this exact
+    var.
+  * `SEMNAV_LSP_T_ARGS` — same generic override as above (extra args
+    appended after the adapter's, empty for custom).
+  * `SEMNAV_LSP_T_EXTERNAL_MARKERS` — optional comma-separated dependency-path
+    fragments (default empty — only the trait's default "not under
+    `root_uri`" `is_external` check applies).
+
+A custom adapter never auto-installs (`server_package()` is always `None`,
+same as Rust/Go) and gets the generic hover-based `construct` refinement for
+free (that logic is value-driven, not language-gated — see
+[lsp-integration.md](./lsp-integration.md)), but has no per-language
+special-casing like TypeScript/Go's interface-to-implementation dispatch
+correction.
+
 ## Distribution
 
 Distributed as a single Rust binary. LSP servers and language runtimes are not bundled; they are procured automatically.

@@ -3,6 +3,18 @@
 Notable changes per release. The release workflow uses the matching section
 as the GitHub release notes (auto-generated notes are the fallback).
 
+## Unreleased
+
+### Added
+
+- **Custom/generic language adapter**: `SEMNAV_CUSTOM_LANGUAGES` registers an
+  LSP server for a language with no built-in adapter (Java, C/C++, Ruby,
+  PHP, ...), configured entirely via `SEMNAV_LSP_<TAG>_EXTENSIONS` /
+  `_COMMAND` / `_ARGS` / `_EXTERNAL_MARKERS` env vars — no new Rust code or
+  release needed. No npm auto-install and no per-language dispatch
+  correction (same reduced scope as Rust/Go), but full indexing/query
+  support otherwise.
+
 ## v0.0.3 (2026-07-12)
 
 ### Added
