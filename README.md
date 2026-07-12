@@ -51,12 +51,13 @@ Every entry is a call site resolved via the LSP's call hierarchy — no comments
 * Nodes carry only metadata (`fqn` / `uri` / `range` / `kind` / `signature`, ...); source text is never cached in the graph and is read from disk on demand via `read_range`.
 * Edges that haven't been built yet (references / call hierarchy) are constructed on demand by querying the LSP, then cached for next time.
 * A filesystem watcher keeps the graph in sync with on-disk edits while a `daemon` is running for `<root>`, including rename tracking (see [docs/design/graph-model.md](docs/design/graph-model.md)).
-* Semantic analysis is fully delegated to the underlying LSP server, so any language with an LSP implementation can in principle be supported. Currently supported: **Python** (pyright), **TypeScript** (typescript-language-server), and **Rust** (rust-analyzer).
+* Semantic analysis is fully delegated to the underlying LSP server, so any language with an LSP implementation can in principle be supported. Currently supported: **Python** (pyright), **TypeScript** (typescript-language-server), **Rust** (rust-analyzer), and **Go** (gopls).
 
 ## Requirements
 
 * Rust (2024 edition)
 * Node.js + npm (semnav provisions `pyright` and `typescript-language-server` via npm on first `index`)
+* Go toolchain + `gopls` on `PATH` if indexing Go (`go install golang.org/x/tools/gopls@latest`) — not auto-installed, same as rust-analyzer
 
 ## Installation
 
@@ -71,10 +72,11 @@ The binary is produced at `target/release/semnav`.
 ## Usage
 
 ```
-semnav discover <root>   list source files (Python/TS/Rust) under <root>
+semnav discover <root>   list source files (Python/TS/Rust/Go) under <root>
 semnav index <root>      index <root> into <root>/.semnav/graph.db
                          (provisions pyright/tsserver via npm, needs node + npm;
-                          rust-analyzer must already be on PATH, e.g. via rustup)
+                          rust-analyzer and gopls must already be on PATH,
+                          e.g. via rustup / `go install golang.org/x/tools/gopls@latest`)
 semnav serve <root>      serve the 8 MCP tools over stdio, proxied to a
                          background daemon (auto-started; run `index` first)
 semnav daemon <root>     run the persistent daemon directly (usually auto-started by `serve`)
@@ -90,7 +92,7 @@ Environment:
 * `SEMNAV_INITIALIZE_TIMEOUT_SECS` — LSP `initialize` handshake timeout (default: 60)
 * `SEMNAV_DOCUMENT_SYMBOL_TIMEOUT_SECS` — LSP `textDocument/documentSymbol` timeout (default: 30)
 * `SEMNAV_QUERY_TIMEOUT_SECS` — query-time LSP round-trip timeout for `find_references`/`find_callers`/`find_callees`/etc. (default: 150)
-* `SEMNAV_LSP_<LANG>_COMMAND` — override the LSP server binary for `<LANG>` (`PYTHON`/`TYPESCRIPT`/`RUST`, upper-cased `language_name()`), bypassing `PATH`/npm-install resolution entirely — point it at a custom build or wrapper script
+* `SEMNAV_LSP_<LANG>_COMMAND` — override the LSP server binary for `<LANG>` (`PYTHON`/`TYPESCRIPT`/`RUST`/`GO`, upper-cased `language_name()`), bypassing `PATH`/npm-install resolution entirely — point it at a custom build or wrapper script
 * `SEMNAV_LSP_<LANG>_ARGS` — extra args appended to that language's LSP server startup command (space-separated), e.g. `SEMNAV_LSP_RUST_ARGS="--log-file /tmp/ra.log"`
 * `SEMNAV_LOG` — tracing filter (`RUST_LOG`-style syntax, e.g. `SEMNAV_LOG=semnav=debug`); silent by default (see [docs/design/observability.md](docs/design/observability.md))
 

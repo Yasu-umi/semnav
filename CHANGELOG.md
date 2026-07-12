@@ -3,6 +3,19 @@
 Notable changes per release. The release workflow uses the matching section
 as the GitHub release notes (auto-generated notes are the fallback).
 
+## Unreleased
+
+### Added
+
+- **Go language support (gopls)**: a fourth built-in `LanguageAdapter`
+  alongside Python/TypeScript/Rust, with full feature parity (`find_symbol`,
+  `find_definition`, `find_references`, `find_callers`, `find_callees`,
+  `find_call_path`). `find_callees`'s interface-to-implementation correction
+  (previously TS-only) now also covers Go's implicit interface satisfaction.
+  `gopls` isn't npm-distributed — install it with
+  `go install golang.org/x/tools/gopls@latest` and ensure it's on `PATH`,
+  same as rust-analyzer.
+
 ## v0.0.2 (2026-07-10)
 
 ### Added
