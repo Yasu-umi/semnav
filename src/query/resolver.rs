@@ -265,14 +265,15 @@ impl QueryEngine {
 
     /// Resolve an `outgoingCalls` `to` item's *actual* target callee id(s).
     ///
-    /// tsserver's `outgoingCalls.to` sometimes points to an interface's
-    /// method declaration rather than the concrete class actually invoked
-    /// through it (`docs/design/lsp-integration.md` callHierarchy note,
-    /// `docs/design/mcp-tools.md` find_callees). pyright can't even answer
-    /// `implementation` (`-32601 Unhandled method`, pinned in
-    /// `src/lsp/client.rs`), so the correction is gated to TypeScript —
-    /// language, not capability, since a Python container never has
-    /// `node_kind == "Interface"` anyway.
+    /// tsserver's and gopls's `outgoingCalls.to` both sometimes point to an
+    /// interface's method declaration rather than the concrete type actually
+    /// invoked through it (`docs/design/lsp-integration.md` callHierarchy
+    /// note, `docs/design/mcp-tools.md` find_callees) — gopls does this for
+    /// any call through an interface-typed parameter, same as tsserver's
+    /// interface-typed dispatch. pyright can't even answer `implementation`
+    /// (`-32601 Unhandled method`, pinned in `src/lsp/client.rs`), so the
+    /// correction is gated to TypeScript and Go — language, not capability,
+    /// since a Python container never has `node_kind == "Interface"` anyway.
     ///
     /// Falls back to `callee_id` unchanged whenever the correction doesn't
     /// apply, times out, or resolves to nothing — never worse than the
@@ -284,7 +285,7 @@ impl QueryEngine {
         callee_id: i64,
         client: &C,
     ) -> Result<(Vec<i64>, bool)> {
-        if anchor.language != "typescript" {
+        if !matches!(anchor.language.as_str(), "typescript" | "go") {
             return Ok((vec![callee_id], false));
         }
         let is_interface = match callee.container_id {
@@ -665,6 +666,139 @@ mod tests {
     async fn outgoing_call_to_interface_method_is_corrected_to_the_implementing_class() {
         let (engine, mock, anchor, anchor_id, interface_method_id, concrete_method_id) =
             interface_dispatch_scenario().await;
+
+        let timed_out = engine
+            .materialize_call_edges(anchor_id, &anchor, Direction::Outgoing, &mock)
+            .await
+            .unwrap();
+        assert!(!timed_out);
+
+        let callees = engine
+            .db()
+            .get_neighbors(anchor_id, "calls", Direction::Outgoing)
+            .await
+            .unwrap();
+        assert_eq!(callees.len(), 1);
+        assert_eq!(
+            callees[0].0.id,
+            Some(concrete_method_id),
+            "the calls edge must point at the concrete method, not the interface's"
+        );
+
+        let implements = engine
+            .db()
+            .get_neighbors(interface_method_id, "implements", Direction::Outgoing)
+            .await
+            .unwrap();
+        assert_eq!(implements.len(), 1);
+        assert_eq!(implements[0].0.id, Some(concrete_method_id));
+    }
+
+    fn go_node(
+        fqn: &str,
+        name: &str,
+        node_kind: &str,
+        line: i64,
+        container_id: Option<i64>,
+    ) -> Node {
+        let mut n = node(fqn, line);
+        n.name = name.to_string();
+        n.node_kind = node_kind.to_string();
+        n.language = "go".to_string();
+        n.container_id = container_id;
+        n.uri = "file:///m.go".to_string();
+        n
+    }
+
+    /// Go analogue of [`interface_dispatch_scenario`]: a `Greeter` interface
+    /// (with a `Greet` method) and a `Person` struct implementing it (with
+    /// its own `Greet`), plus a `SayHello` function whose `outgoingCalls`
+    /// mock response points `to` the interface's method — the exact shape
+    /// observed live probing gopls (`docs/design/lsp-integration.md`
+    /// callHierarchy note). The concrete container is `"Struct"` rather than
+    /// `"Class"`, since the correction only checks the *callee's* container
+    /// is `"Interface"`, not the shape of the implementer.
+    /// Returns `(engine, mock, anchor, anchor_id, interface_method_id, concrete_method_id)`.
+    async fn interface_dispatch_scenario_go()
+    -> (QueryEngine, MockLspQueryClient, Node, i64, i64, i64) {
+        let engine = engine();
+        let caller = go_node("repo.SayHello", "SayHello", "Function", 10, None);
+        let anchor_id = engine.db().upsert_node(caller.clone()).await.unwrap();
+
+        let mut interface = go_node("repo.Greeter", "Greeter", "Interface", 0, None);
+        interface.range.end_line = 3;
+        let interface_id = engine.db().upsert_node(interface).await.unwrap();
+        let interface_method = go_node(
+            "repo.Greeter.Greet",
+            "Greet",
+            "Method",
+            1,
+            Some(interface_id),
+        );
+        let interface_method_id = engine.db().upsert_node(interface_method).await.unwrap();
+
+        let mut concrete_struct = go_node("repo.Person", "Person", "Struct", 4, None);
+        concrete_struct.range.end_line = 7;
+        let concrete_struct_id = engine.db().upsert_node(concrete_struct).await.unwrap();
+        let concrete_method = go_node(
+            "repo.(*Person).Greet",
+            "(*Person).Greet",
+            "Method",
+            5,
+            Some(concrete_struct_id),
+        );
+        let concrete_method_id = engine.db().upsert_node(concrete_method).await.unwrap();
+
+        let mut mock = MockLspQueryClient::new();
+        let caller_item = CallHierarchyItem {
+            name: "SayHello".into(),
+            kind: 12,
+            uri: "file:///m.go".into(),
+            range: rng(10, 0, 12, 0),
+            selection_range: rng(10, 0, 10, 8),
+            raw: serde_json::json!({ "uri": "file:///m.go", "name": "SayHello" }),
+        };
+        mock.prepare.insert(
+            ("file:///m.go".to_string(), 10, 0),
+            vec![caller_item.clone()],
+        );
+        let interface_method_item = CallHierarchyItem {
+            name: "Greet".into(),
+            kind: 6,
+            uri: "file:///m.go".into(),
+            range: rng(1, 0, 1, 5),
+            selection_range: rng(1, 0, 1, 5),
+            raw: serde_json::json!({ "uri": "file:///m.go", "name": "Greet" }),
+        };
+        mock.outgoing.insert(
+            caller_item.key(),
+            vec![OutgoingCall {
+                to: interface_method_item,
+                from_ranges: vec![rng(11, 4, 11, 9)],
+            }],
+        );
+        mock.implementations.insert(
+            ("file:///m.go".to_string(), 1, 0),
+            vec![Location {
+                uri: "file:///m.go".to_string(),
+                range: rng(5, 0, 5, 4),
+            }],
+        );
+
+        (
+            engine,
+            mock,
+            caller,
+            anchor_id,
+            interface_method_id,
+            concrete_method_id,
+        )
+    }
+
+    #[tokio::test]
+    async fn outgoing_call_to_interface_method_is_corrected_for_go() {
+        let (engine, mock, anchor, anchor_id, interface_method_id, concrete_method_id) =
+            interface_dispatch_scenario_go().await;
 
         let timed_out = engine
             .materialize_call_edges(anchor_id, &anchor, Direction::Outgoing, &mock)
