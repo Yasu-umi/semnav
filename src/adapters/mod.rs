@@ -4,6 +4,7 @@
 //!
 //! See `docs/design/language-adapters.md`.
 
+mod custom;
 mod go;
 mod kind;
 mod provision;
@@ -11,6 +12,7 @@ mod python;
 mod rust;
 mod typescript;
 
+pub use custom::CustomAdapter;
 pub use go::GoAdapter;
 pub use kind::{NodeKind, SymbolKind};
 pub use provision::{ProvisionContext, provision};
@@ -112,9 +114,18 @@ pub trait LanguageAdapter: Send + Sync {
 
 /// The built-in adapters: Python, TypeScript, and Rust shipped with 0.0.1;
 /// Go added afterward. References are `'static` (unit-struct ZST promotion),
-/// so the registry is cheap to build.
+/// so the registry is cheap to build. Any user-configured custom languages
+/// (`SEMNAV_CUSTOM_LANGUAGES`, see [`custom::custom_adapters`]) are appended
+/// after the built-ins; empty (so this is a no-op) unless a user opts in.
 pub fn builtin_adapters() -> Vec<&'static dyn LanguageAdapter> {
-    vec![&PythonAdapter, &TypeScriptAdapter, &RustAdapter, &GoAdapter]
+    let mut adapters: Vec<&'static dyn LanguageAdapter> =
+        vec![&PythonAdapter, &TypeScriptAdapter, &RustAdapter, &GoAdapter];
+    adapters.extend(
+        custom::custom_adapters()
+            .iter()
+            .map(|a| a as &dyn LanguageAdapter),
+    );
+    adapters
 }
 
 /// Pick the built-in adapter that owns `uri`, if any.
